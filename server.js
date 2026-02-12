@@ -6,212 +6,166 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// CORS per permettere chiamate da browser (da qualsiasi dominio)
+// CORS
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
     res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    if (req.method === 'OPTIONS') {
-        return res.status(200).end();
-    }
+    if (req.method === 'OPTIONS') return res.status(200).end();
     next();
 });
 
-// Health check
+const BLOCKED_TYPES = ['image', 'font', 'stylesheet'];
+const BLOCKED_URLS = ['google-analytics', 'googletagmanager', 'facebook.net', 'doubleclick', 'googlesyndication'];
+const VIDEO_EXTENSIONS = ['.mp4', '.m3u8', '.webm', '.ts'];
+const VIDEO_PATTERNS = ['/hls/', '/dash/', '/manifest', 'video/mp4'];
+
+function isVideoRequest(url) {
+    const lower = url.toLowerCase();
+    if (lower.includes('.js') || lower.includes('.css') || lower.includes('.png') ||
+        lower.includes('.jpg') || lower.includes('.gif') || lower.includes('.woff') ||
+        lower.includes('analytics') || lower.includes('tracking')) return false;
+    return VIDEO_EXTENSIONS.some(e => lower.includes(e)) ||
+           VIDEO_PATTERNS.some(p => lower.includes(p));
+}
+
 app.get('/', (req, res) => {
-    res.json({ status: 'ok', service: 'Video Extractor' });
+    res.json({ status: 'ok', service: 'Video Extractor v2' });
 });
 
-/**
- * POST /extract
- * Body: { url: "https://mixdrop.vip/e/abc123" }
- * Returns: { success: true, video_url: "https://..." }
- */
 app.post('/extract', async (req, res) => {
     const { url } = req.body;
+    if (!url) return res.json({ success: false, message: 'URL mancante' });
 
-    if (!url) {
-        return res.json({ success: false, message: 'URL mancante' });
-    }
-
-    console.log('[Extractor] Inizio estrazione da:', url);
-
+    console.log('[Extractor] Estrazione da:', url);
     let browser = null;
 
     try {
-        // Lancia Chromium headless
         browser = await puppeteer.launch({
-            args: chromium.args,
-            defaultViewport: chromium.defaultViewport,
+            args: [
+                ...chromium.args,
+                '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote',
+                '--disable-gpu', '--disable-extensions', '--mute-audio',
+            ],
+            defaultViewport: { width: 1280, height: 720 },
             executablePath: await chromium.executablePath(),
-            headless: chromium.headless,
+            headless: true,
+            ignoreHTTPSErrors: true,
         });
 
         const page = await browser.newPage();
-
-        // Intercetta le richieste di rete per trovare il video
         let videoUrl = null;
 
         await page.setRequestInterception(true);
-
-        page.on('request', (request) => {
-            const reqUrl = request.url();
-
-            // Cerca URL video nelle richieste di rete
-            if (isVideoUrl(reqUrl) && !videoUrl) {
-                videoUrl = reqUrl;
-                console.log('[Extractor] Video trovato nelle richieste:', reqUrl);
+        
+        page.on('request', (req) => {
+            if (BLOCKED_TYPES.includes(req.resourceType())) return req.abort();
+            if (BLOCKED_URLS.some(b => req.url().includes(b))) return req.abort();
+            if (!videoUrl && isVideoRequest(req.url())) {
+                videoUrl = req.url();
+                console.log('[Extractor] Video nelle richieste:', videoUrl);
             }
-
-            request.continue();
+            req.continue();
         });
 
-        // Imposta User Agent realistico
-        await page.setUserAgent(
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        );
-
-        // Carica la pagina
-        await page.goto(url, {
-            waitUntil: 'networkidle2',
-            timeout: 30000
+        page.on('response', async (response) => {
+            if (videoUrl) return;
+            const contentType = response.headers()['content-type'] || '';
+            if (contentType.includes('video/') || contentType.includes('application/x-mpegurl')) {
+                videoUrl = response.url();
+                console.log('[Extractor] Video negli header:', videoUrl);
+            }
         });
 
-        // Aspetta un po' per il caricamento JavaScript
-        await sleep(2000);
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
-        // Cerca il pulsante Play e clicca
+        try {
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+        } catch(e) {
+            console.log('[Extractor] Timeout goto, continuo...');
+        }
+
+        await sleep(1500);
+
         if (!videoUrl) {
-            console.log('[Extractor] Cerco pulsante Play...');
-            
-            const playSelectors = [
-                // Selettori comuni per il pulsante play
-                '.jw-icon-display',
-                '.vjs-big-play-button',
-                '.play-button',
-                '[aria-label="Play"]',
-                '.plyr__control--overlaid',
-                '#player .play',
-                '.fp-play',
-                'button.play',
-                '.video-play-button',
-                '[data-action="play"]',
-                '.jwplayer .jw-display-icon-container',
-            ];
+            videoUrl = await page.evaluate(() => {
+                const videos = document.querySelectorAll('video');
+                for (const v of videos) {
+                    if (v.src && v.src.startsWith('http')) return v.src;
+                    const src = v.querySelector('source[src]');
+                    if (src && src.src.startsWith('http')) return src.src;
+                }
+                const scripts = document.querySelectorAll('script:not([src])');
+                const patterns = [
+                    /MDCore\.wurl\s*=\s*["']([^"']+)["']/,
+                    /wurl\s*[=:]\s*["']([^"']+)["']/,
+                    /file\s*:\s*["'](https?:[^"']+\.mp4[^"']*)["']/i,
+                    /file\s*:\s*["'](https?:[^"']+\.m3u8[^"']*)["']/i,
+                    /videoUrl\s*[=:]\s*["'](https?:[^"']+)["']/i,
+                    /hlsUrl\s*[=:]\s*["'](https?:[^"']+\.m3u8[^"']*)["']/i,
+                ];
+                for (const script of scripts) {
+                    const text = script.textContent;
+                    for (const p of patterns) {
+                        const m = text.match(p);
+                        if (m) {
+                            const u = m[1].startsWith('//') ? 'https:' + m[1] : m[1];
+                            if (u.startsWith('http')) return u;
+                        }
+                    }
+                }
+                return null;
+            });
+        }
 
+        if (!videoUrl) {
+            console.log('[Extractor] Provo Play...');
+            const playSelectors = [
+                '.jw-icon-display', '.vjs-big-play-button', '[aria-label="Play"]',
+                '.plyr__control--overlaid', '.jwplayer .jw-display-icon-container',
+                'button[class*="play"]', '[class*="play-btn"]',
+            ];
             for (const selector of playSelectors) {
                 try {
                     const btn = await page.$(selector);
                     if (btn) {
-                        console.log('[Extractor] Clicco play:', selector);
                         await btn.click();
-                        await sleep(3000);
+                        console.log('[Extractor] Cliccato:', selector);
+                        await sleep(4000);
                         break;
                     }
-                } catch (e) {}
+                } catch(e) {}
             }
+            try { await page.click('video'); await sleep(2000); } catch(e) {}
 
-            // Prova a cliccare sul video/player direttamente
-            try {
-                await page.click('video');
-                await sleep(2000);
-            } catch (e) {}
-
-            // Prova a triggerare il play via JavaScript
             if (!videoUrl) {
                 videoUrl = await page.evaluate(() => {
-                    // Metodo 1: Tag video
-                    const videos = document.querySelectorAll('video');
-                    for (const v of videos) {
-                        if (v.src && v.src.length > 10) return v.src;
-                        const source = v.querySelector('source');
-                        if (source && source.src) return source.src;
-                    }
-
-                    // Metodo 2: Cerca nell'HTML della pagina
                     const html = document.documentElement.innerHTML;
-                    
-                    const patterns = [
-                        /MDCore\.wurl\s*=\s*["']([^"']+)["']/,
-                        /wurl\s*:\s*["']([^"']+)["']/,
-                        /file\s*:\s*["']([^"']+\.mp4[^"']*)["']/,
-                        /sources?\s*:\s*\[\s*{[^}]*file\s*:\s*["']([^"']+)["']/,
-                        /"(https?:\/\/[^"]+\.mp4[^"]*)"/,
-                        /'(https:\/\/[^']+\.m3u8[^']*)'/,
-                    ];
-
-                    for (const p of patterns) {
-                        const m = html.match(p);
-                        if (m) return m[1].startsWith('//') ? 'https:' + m[1] : m[1];
-                    }
-
-                    return null;
+                    const m = html.match(/["'](https?:\/\/[^"']{10,}(?:\.mp4|\.m3u8)[^"']*?)["']/);
+                    return m ? m[1] : null;
                 });
             }
         }
 
-        // Aspetta ancora se non trovato
-        if (!videoUrl) {
-            await sleep(3000);
-
-            // Cerca ancora nelle richieste di rete
-            videoUrl = await page.evaluate(() => {
-                const html = document.documentElement.innerHTML;
-                const m = html.match(/["'](https?:\/\/[^"']+(?:\.mp4|\.m3u8)[^"']*?)["']/);
-                return m ? m[1] : null;
-            });
-        }
-
         await browser.close();
+        browser = null;
 
         if (videoUrl) {
             console.log('[Extractor] Successo:', videoUrl);
-            return res.json({
-                success: true,
-                video_url: videoUrl,
-                source_url: url
-            });
+            return res.json({ success: true, video_url: videoUrl, source: url });
         } else {
-            console.log('[Extractor] Video non trovato');
-            return res.json({
-                success: false,
-                message: 'Video non trovato nella pagina'
-            });
+            return res.json({ success: false, message: 'Video non trovato nella pagina' });
         }
 
     } catch (error) {
         console.error('[Extractor] Errore:', error.message);
-        if (browser) await browser.close();
-        return res.json({
-            success: false,
-            message: 'Errore: ' + error.message
-        });
+        if (browser) try { await browser.close(); } catch(e) {}
+        return res.json({ success: false, message: 'Errore: ' + error.message });
     }
 });
 
-// Helper: controlla se un URL è un video
-function isVideoUrl(url) {
-    const videoExtensions = ['.mp4', '.m3u8', '.webm', '.mkv', '.ts'];
-    const videoPatterns = ['video/', 'stream/', 'hls/', 'manifest'];
-    
-    const lowerUrl = url.toLowerCase();
-    
-    if (videoExtensions.some(ext => lowerUrl.includes(ext))) return true;
-    if (videoPatterns.some(p => lowerUrl.includes(p))) return true;
-    
-    // Esclude risorse non video
-    if (lowerUrl.includes('.js') || lowerUrl.includes('.css') || 
-        lowerUrl.includes('.png') || lowerUrl.includes('.jpg') ||
-        lowerUrl.includes('google') || lowerUrl.includes('analytics')) return false;
-    
-    return false;
-}
-
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Video Extractor Service in ascolto su porta ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Video Extractor v2 sulla porta ${PORT}`));
