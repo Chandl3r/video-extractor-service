@@ -15,7 +15,7 @@ app.use((req, res, next) => {
 });
 
 app.get('/', (req, res) => {
-    res.json({ status: 'ok', service: 'Video Extractor v4' });
+    res.json({ status: 'ok', service: 'Video Extractor v5-debug' });
 });
 
 const VIDEO_EXTS = ['.mp4', '.m3u8', '.webm', '.ts'];
@@ -26,7 +26,7 @@ function looksLikeVideo(url) {
     const u = url.toLowerCase();
     if (u.includes('.js') || u.includes('.css') || u.includes('.png') ||
         u.includes('.jpg') || u.includes('.gif') || u.includes('.ico') ||
-        u.includes('.woff') || u.includes('analytics') || u.includes('ads')) return false;
+        u.includes('.woff') || u.includes('analytics')) return false;
     return VIDEO_EXTS.some(e => u.includes(e));
 }
 
@@ -34,16 +34,23 @@ app.post('/extract', async (req, res) => {
     const { url } = req.body;
     if (!url) return res.json({ success: false, message: 'URL mancante' });
 
-    console.log('[v4] Estrazione:', url);
+    console.log('[v5] Estrazione:', url);
     let browser = null;
     let resolved = false;
+    let allRequests = []; // Log tutte le richieste per debug
 
     const globalTimeout = setTimeout(() => {
         if (!resolved) {
             resolved = true;
-            console.log('[v4] Timeout globale 45s');
+            console.log('[v5] Timeout - richieste intercettate:', allRequests.length);
+            // Logga le ultime 20 richieste per capire cosa ha caricato
+            allRequests.slice(-20).forEach(r => console.log('[v5] req:', r));
             if (browser) browser.close().catch(() => {});
-            res.json({ success: false, message: 'Timeout: video non trovato in tempo' });
+            res.json({ 
+                success: false, 
+                message: 'Timeout',
+                debug_requests: allRequests.slice(-30)
+            });
         }
     }, 45000);
 
@@ -55,7 +62,7 @@ app.post('/extract', async (req, res) => {
                 '--disable-dev-shm-usage', '--disable-gpu',
                 '--no-first-run', '--no-zygote', '--single-process',
                 '--disable-extensions', '--mute-audio',
-                '--disable-blink-features=AutomationControlled', // Anti-detection!
+                '--disable-blink-features=AutomationControlled',
             ],
             defaultViewport: { width: 1280, height: 720 },
             executablePath: await chromium.executablePath(),
@@ -66,18 +73,11 @@ app.post('/extract', async (req, res) => {
         const page = await browser.newPage();
         let videoUrl = null;
 
-        // === ANTI-DETECTION: rimuovi segni di automazione ===
         await page.evaluateOnNewDocument(() => {
-            // Rimuovi webdriver flag
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            // Simula plugins reali
             Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-            // Simula linguaggi reali
             Object.defineProperty(navigator, 'languages', { get: () => ['it-IT', 'it', 'en-US', 'en'] });
-            // Simula chrome reale
             window.chrome = { runtime: {} };
-            // Rimuovi segni di headless
-            Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 4 });
         });
 
         await page.setRequestInterception(true);
@@ -86,16 +86,19 @@ app.post('/extract', async (req, res) => {
             const reqUrl = req.url();
             const resType = req.resourceType();
 
+            // Logga TUTTE le richieste (per debug)
+            allRequests.push(resType + ': ' + reqUrl.substring(0, 100));
+
             if (BLOCK_TYPES.includes(resType)) return req.abort();
             if (BLOCK_URLS.some(b => reqUrl.includes(b))) return req.abort();
 
             if (!videoUrl && looksLikeVideo(reqUrl)) {
                 videoUrl = reqUrl;
-                console.log('[v4] ✅ VIDEO (richiesta):', reqUrl);
+                console.log('[v5] ✅ VIDEO:', reqUrl);
                 clearTimeout(globalTimeout);
                 if (!resolved) {
                     resolved = true;
-                    res.json({ success: true, video_url: videoUrl, source: url });
+                    res.json({ success: true, video_url: videoUrl });
                     setImmediate(() => browser.close().catch(() => {}));
                 }
             }
@@ -105,43 +108,46 @@ app.post('/extract', async (req, res) => {
         page.on('response', (response) => {
             if (videoUrl || resolved) return;
             const ct = response.headers()['content-type'] || '';
-            if (ct.includes('video/') || ct.includes('application/x-mpegurl') || ct.includes('application/vnd.apple.mpegurl')) {
+            if (ct.includes('video/') || ct.includes('mpegurl')) {
                 videoUrl = response.url();
-                console.log('[v4] ✅ VIDEO (risposta header):', videoUrl);
+                console.log('[v5] ✅ VIDEO (header):', videoUrl);
                 clearTimeout(globalTimeout);
                 if (!resolved) {
                     resolved = true;
-                    res.json({ success: true, video_url: videoUrl, source: url });
+                    res.json({ success: true, video_url: videoUrl });
                     setImmediate(() => browser.close().catch(() => {}));
                 }
             }
         });
 
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-
-        // Imposta header HTTP realistici
         await page.setExtraHTTPHeaders({
-            'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8',
             'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
             'sec-ch-ua-mobile': '?0',
             'sec-ch-ua-platform': '"Windows"',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Upgrade-Insecure-Requests': '1',
         });
 
-        // Carica la pagina
         page.goto(url, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(e => {
-            console.log('[v4] goto:', e.message.substring(0, 60));
+            console.log('[v5] goto error:', e.message.substring(0, 80));
         });
 
-        // Aspetta 3s poi cerca nell'HTML
         await sleep(3000);
 
         if (!videoUrl && !resolved) {
-            console.log('[v4] Cerco nell\'HTML...');
+            // Log stato pagina per debug
+            try {
+                const pageInfo = await page.evaluate(() => ({
+                    title: document.title,
+                    url: window.location.href,
+                    htmlLength: document.documentElement.innerHTML.length,
+                    hasVideo: document.querySelectorAll('video').length,
+                    bodyText: document.body?.innerText?.substring(0, 200) || '',
+                }));
+                console.log('[v5] Pagina:', JSON.stringify(pageInfo));
+            } catch(e) { console.log('[v5] eval error:', e.message); }
+
+            // Cerca video nell'HTML
             try {
                 videoUrl = await page.evaluate(() => {
                     for (const v of document.querySelectorAll('video')) {
@@ -155,7 +161,6 @@ app.post('/extract', async (req, res) => {
                         /file\s*:\s*["'](https?:[^"']+\.mp4[^"']*)["']/i,
                         /file\s*:\s*["'](https?:[^"']+\.m3u8[^"']*)["']/i,
                         /"(https?:\/\/[^"]{15,}\.mp4[^"]*)"/,
-                        /"(https?:\/\/[^"]{15,}\.m3u8[^"]*)"/,
                     ];
                     for (const s of document.querySelectorAll('script:not([src])')) {
                         for (const p of patterns) {
@@ -163,54 +168,38 @@ app.post('/extract', async (req, res) => {
                             if (m) return m[1].startsWith('//') ? 'https:' + m[1] : m[1];
                         }
                     }
-                    // Log HTML per debug
-                    console.log('[page] HTML length:', document.documentElement.innerHTML.length);
-                    console.log('[page] title:', document.title);
                     return null;
                 });
-            } catch(e) { console.log('[v4] evaluate error:', e.message); }
+            } catch(e) {}
 
             if (videoUrl) {
+                console.log('[v5] ✅ VIDEO (HTML):', videoUrl);
                 clearTimeout(globalTimeout);
                 if (!resolved) {
                     resolved = true;
-                    console.log('[v4] ✅ VIDEO (HTML):', videoUrl);
-                    res.json({ success: true, video_url: videoUrl, source: url });
+                    res.json({ success: true, video_url: videoUrl });
                     setImmediate(() => browser.close().catch(() => {}));
                 }
                 return;
             }
-        }
 
-        // Premi Play
-        if (!videoUrl && !resolved) {
-            console.log('[v4] Provo Play...');
+            // Premi Play
+            console.log('[v5] Provo Play...');
             const selectors = [
                 '.jw-icon-display', '.vjs-big-play-button', '[aria-label="Play"]',
-                '.plyr__control--overlaid', '.jwplayer .jw-display-icon-container',
-                'button[class*="play"]', '[id*="play"]', '[class*="play"]',
+                '.plyr__control--overlaid', 'button[class*="play"]',
             ];
             for (const sel of selectors) {
                 try {
                     const btn = await page.$(sel);
-                    if (btn) {
-                        await btn.click();
-                        console.log('[v4] Cliccato:', sel);
-                        await sleep(4000);
-                        break;
-                    }
+                    if (btn) { await btn.click(); console.log('[v5] Click:', sel); await sleep(4000); break; }
                 } catch(e) {}
             }
-            // Prova click generico sul centro della pagina (dove spesso c'è il player)
-            try {
-                await page.mouse.click(640, 360);
-                console.log('[v4] Click centro pagina');
-                await sleep(3000);
-            } catch(e) {}
+            try { await page.mouse.click(640, 360); await sleep(3000); } catch(e) {}
         }
 
     } catch (error) {
-        console.error('[v4] Errore:', error.message);
+        console.error('[v5] Errore:', error.message);
         clearTimeout(globalTimeout);
         if (!resolved) {
             resolved = true;
@@ -223,4 +212,4 @@ app.post('/extract', async (req, res) => {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v4 porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v5-debug porta ${PORT}`));
