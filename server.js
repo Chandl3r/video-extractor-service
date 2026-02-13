@@ -55,7 +55,7 @@ app.post('/extract', async (req, res) => {
             if (browser) browser.close().catch(() => {});
             res.json({ success: false, message: 'Timeout' });
         }
-    }, 55000);
+    }, 70000);
 
     try {
         console.log('[v15] Avvio Chromium...');
@@ -111,7 +111,7 @@ app.post('/extract', async (req, res) => {
 
             cookieCache.set(url, {
                 cookieStr,
-                referer: new URL(url).origin + '/',
+                referer: url,  // URL completo dell'embed, non solo origin
                 ts: Date.now(),
             });
 
@@ -170,8 +170,23 @@ app.post('/extract', async (req, res) => {
 
         if (resolved) return;
 
-        await sleep(2500);
-        console.log('[v15] Attesa iniziale completata, resolved:', resolved);
+        // Poll rapido ogni 500ms per i primi 15 secondi
+        for (let w = 0; w < 30 && !resolved; w++) {
+            await sleep(500);
+            const quick = await page.evaluate(() => {
+                try { if (window.MDCore?.wurl) { const u=window.MDCore.wurl; return u.startsWith('//')?'https:'+u:u; } } catch(e){}
+                try { if (window.jwplayer) { const p=window.jwplayer().getPlaylist?.(); if(p?.[0]?.file)return p[0].file; } } catch(e){}
+                const m=document.documentElement.innerHTML.match(/"(https?:\/\/[^"]{15,}\.(?:mp4|m3u8)[^"]{0,100})"/);
+                return m?.[1]||null;
+            }).catch(()=>null);
+            if (quick) {
+                console.log(`[v15] Trovato in poll rapido (${w*0.5}s):`, quick.substring(0, 80));
+                if (!resolved) resolveVideo(quick, 'poll');
+                return;
+            }
+        }
+
+        console.log('[v15] Poll rapido completato, resolved:', resolved);
         if (resolved) return;
 
         // Check DOM
@@ -263,12 +278,18 @@ app.get('/proxy', (req, res) => {
 
     const protocol = parsed.protocol === 'https:' ? https : http;
 
+    let refererOrigin = 'https://mixdrop.vip';
+    try { refererOrigin = new URL(referer).origin; } catch(e) {}
+
     const headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': referer,
-        'Origin': new URL(referer).origin,
+        'Referer': referer,        // URL completo embed: https://mixdrop.vip/emb/7kpp37vmi31zj4
+        'Origin': refererOrigin,   // Solo origin: https://mixdrop.vip
         'Accept': '*/*',
         'Accept-Language': 'it-IT,it;q=0.9',
+        'Sec-Fetch-Dest': 'video',
+        'Sec-Fetch-Mode': 'no-cors',
+        'Sec-Fetch-Site': 'cross-site',
     };
     if (cookieStr) headers['Cookie'] = cookieStr;
     if (req.headers['range']) headers['Range'] = req.headers['range'];
