@@ -18,7 +18,7 @@ app.use((req, res, next) => {
 });
 
 app.get('/', (req, res) => {
-    res.json({ status: 'ok', service: 'Video Extractor v9' });
+    res.json({ status: 'ok', service: 'Video Extractor v10' });
 });
 
 const VIDEO_EXTS = ['.mp4', '.m3u8', '.webm', '.ts'];
@@ -51,14 +51,6 @@ async function checkForVideo(page) {
                     if (p?.[0]?.sources?.[0]?.file) return p[0].sources[0].file;
                 }
             } catch(e) {}
-            try {
-                if (window.videojs?.players) {
-                    for (const p of Object.values(window.videojs.players)) {
-                        const s = p.currentSrc?.();
-                        if (s?.startsWith('http')) return s;
-                    }
-                }
-            } catch(e) {}
             const html = document.documentElement.innerHTML;
             const patterns = [
                 /MDCore\.wurl\s*=\s*["']([^"']{10,})["']/,
@@ -76,11 +68,72 @@ async function checkForVideo(page) {
     } catch(e) { return null; }
 }
 
+// Chiudi tutti gli overlay/popup pubblicitari visibili
+async function dismissAds(page) {
+    try {
+        const dismissed = await page.evaluate(() => {
+            let count = 0;
+            
+            // Selettori comuni per chiudere ads/overlay
+            const closeSelectors = [
+                // Pulsanti chiudi generici
+                '[class*="close"]', '[id*="close"]',
+                '[class*="dismiss"]', '[id*="dismiss"]',
+                '[class*="skip"]', '[id*="skip"]',
+                '[aria-label="Close"]', '[aria-label="close"]',
+                '[aria-label="Dismiss"]',
+                // Overlay/popup
+                '[class*="overlay"] [class*="close"]',
+                '[class*="popup"] [class*="close"]',
+                '[class*="modal"] [class*="close"]',
+                '[class*="ad-close"]', '[class*="adClose"]',
+                // Iframe overlay (click per chiudere)
+                '[class*="ad-container"]', '[class*="adContainer"]',
+            ];
+            
+            for (const sel of closeSelectors) {
+                try {
+                    const els = document.querySelectorAll(sel);
+                    for (const el of els) {
+                        const style = window.getComputedStyle(el);
+                        // Solo elementi visibili
+                        if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
+                            el.click();
+                            count++;
+                        }
+                    }
+                } catch(e) {}
+            }
+            
+            // Rimuovi overlay con z-index alto (ads)
+            const allEls = document.querySelectorAll('*');
+            for (const el of allEls) {
+                try {
+                    const style = window.getComputedStyle(el);
+                    const zIndex = parseInt(style.zIndex);
+                    const pos = style.position;
+                    if (zIndex > 1000 && (pos === 'fixed' || pos === 'absolute')) {
+                        const rect = el.getBoundingClientRect();
+                        // Se copre buona parte dello schermo
+                        if (rect.width > 200 && rect.height > 200) {
+                            el.remove();
+                            count++;
+                        }
+                    }
+                } catch(e) {}
+            }
+            
+            return count;
+        });
+        if (dismissed > 0) console.log(`[v10] Rimossi ${dismissed} overlay/ads`);
+    } catch(e) {}
+}
+
 app.post('/extract', async (req, res) => {
     const { url } = req.body;
     if (!url) return res.json({ success: false, message: 'URL mancante' });
 
-    console.log('[v9] Estrazione:', url);
+    console.log('[v10] Estrazione:', url);
     let browser = null;
     let resolved = false;
 
@@ -108,7 +161,7 @@ app.post('/extract', async (req, res) => {
         function resolveVideo(vUrl, src) {
             if (!resolved) {
                 resolved = true;
-                console.log(`[v9] ✅ VIDEO (${src}):`, vUrl);
+                console.log(`[v10] ✅ VIDEO (${src}):`, vUrl);
                 clearTimeout(globalTimeout);
                 res.json({ success: true, video_url: vUrl });
                 setImmediate(() => browser.close().catch(() => {}));
@@ -139,89 +192,87 @@ app.post('/extract', async (req, res) => {
         });
 
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(e => {
-            console.log('[v9] goto:', e.message.substring(0, 60));
+            console.log('[v10] goto:', e.message.substring(0, 60));
         });
 
         await sleep(2000);
         if (resolved) return;
 
-        // Mixdrop richiede MOLTI click per superare gli ad overlay
-        // Simuliamo 10 click in posizioni diverse con pause realistiche
-        console.log('[v9] Simulazione click multipli (stile umano)...');
+        // Controlla subito dopo il caricamento
+        let v = await checkForVideo(page);
+        if (v && !resolved) { resolveVideo(v, 'initial'); return; }
 
-        // Posizioni di click diverse per simulare comportamento reale
-        const clickPositions = [
-            { x: 640, y: 360 },  // centro
-            { x: 640, y: 360 },  // centro ancora
-            { x: 635, y: 355 },  // leggermente spostato
-            { x: 645, y: 365 },
-            { x: 640, y: 360 },
-            { x: 638, y: 358 },
-            { x: 642, y: 362 },
-            { x: 640, y: 360 },
-            { x: 640, y: 360 },
-            { x: 640, y: 360 },
-        ];
+        // STRATEGIA: dismissAds + click sul vero player, ripetuto molte volte
+        console.log('[v10] Strategia: dismiss ads + click player...');
 
-        for (let i = 0; i < clickPositions.length; i++) {
-            if (resolved) break;
-            
-            const pos = clickPositions[i];
-            
-            // Muovi il mouse alla posizione
-            await page.mouse.move(pos.x, pos.y, { steps: 5 });
-            await sleep(150 + Math.random() * 200);
-            await page.mouse.click(pos.x, pos.y);
-            
-            console.log(`[v9] Click ${i+1}/10 su (${pos.x},${pos.y})`);
-            
-            // Attendi un po' tra i click (come farebbe un umano)
-            await sleep(800 + Math.random() * 500);
-            
-            // Controlla se il video è apparso
-            const v = await checkForVideo(page);
-            if (v && !resolved) {
-                resolveVideo(v, `click-${i+1}`);
-                return;
-            }
+        for (let round = 0; round < 20 && !resolved; round++) {
+            // 1. Chiudi ads e overlay
+            await dismissAds(page);
+            await sleep(300);
 
-            // Ogni 3 click, prova anche i selettori del player
-            if (i % 3 === 2) {
-                const playSelectors = [
-                    '.jw-icon-display', '.jw-display-icon-container',
-                    '.vjs-big-play-button', '[aria-label="Play"]',
-                    '.plyr__control--overlaid',
-                ];
-                for (const sel of playSelectors) {
-                    try {
-                        const el = await page.$(sel);
-                        if (el) {
-                            const box = await el.boundingBox();
-                            if (box) {
-                                await page.mouse.click(box.x + box.width/2, box.y + box.height/2);
-                                console.log('[v9] Click selettore:', sel);
-                                await sleep(1000);
-                                const v2 = await checkForVideo(page);
-                                if (v2 && !resolved) { resolveVideo(v2, 'selector-' + sel); return; }
-                            }
+            // 2. Trova il player e clicca
+            const playerSelectors = [
+                '.jw-icon-display',
+                '.jw-display-icon-container', 
+                '.vjs-big-play-button',
+                '[aria-label="Play"]',
+                '.plyr__control--overlaid',
+                '#player',
+                '.player-container',
+                'video',
+                // Fallback: centro pagina
+            ];
+
+            let clicked = false;
+            for (const sel of playerSelectors) {
+                try {
+                    const el = await page.$(sel);
+                    if (el) {
+                        const box = await el.boundingBox();
+                        if (box && box.width > 0 && box.height > 0) {
+                            await page.mouse.move(
+                                box.x + box.width/2 + (Math.random()*10-5),
+                                box.y + box.height/2 + (Math.random()*10-5),
+                                { steps: 5 }
+                            );
+                            await sleep(100);
+                            await page.mouse.click(
+                                box.x + box.width/2 + (Math.random()*10-5),
+                                box.y + box.height/2 + (Math.random()*10-5)
+                            );
+                            console.log(`[v10] Round ${round+1}: click su "${sel}"`);
+                            clicked = true;
+                            break;
                         }
-                    } catch(e) {}
-                }
+                    }
+                } catch(e) {}
             }
+
+            // Fallback: click centro
+            if (!clicked) {
+                await page.mouse.click(640 + (Math.random()*20-10), 360 + (Math.random()*20-10));
+                console.log(`[v10] Round ${round+1}: click centro (fallback)`);
+            }
+
+            // 3. Attendi e controlla
+            await sleep(1000);
+            v = await checkForVideo(page);
+            if (v && !resolved) { resolveVideo(v, `round-${round+1}`); return; }
+
+            // Pausa variabile tra i round
+            await sleep(500 + Math.random() * 500);
         }
 
         // Polling finale
-        console.log('[v9] Polling finale...');
-        for (let i = 0; i < 8; i++) {
-            if (resolved) break;
+        console.log('[v10] Polling finale...');
+        for (let i = 0; i < 5 && !resolved; i++) {
             await sleep(2000);
-            const v = await checkForVideo(page);
-            if (v && !resolved) { resolveVideo(v, `final-poll-${i}`); return; }
-            console.log(`[v9] Final poll ${i+1}/8`);
+            v = await checkForVideo(page);
+            if (v && !resolved) { resolveVideo(v, `final-${i}`); return; }
         }
 
     } catch (error) {
-        console.error('[v9] Errore:', error.message);
+        console.error('[v10] Errore:', error.message);
         clearTimeout(globalTimeout);
         if (!resolved) {
             resolved = true;
@@ -234,4 +285,4 @@ app.post('/extract', async (req, res) => {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v9 porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v10 porta ${PORT}`));
