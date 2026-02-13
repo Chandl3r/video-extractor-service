@@ -92,35 +92,32 @@ app.post('/extract', async (req, res) => {
             Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
         });
 
-        // Gestione sincrona della risoluzione (NO async!)
-        function resolveVideo(vUrl, src) {
+        // Risoluzione ASINCRONA: raccoglie cookie PRIMA di rispondere
+        async function resolveVideo(vUrl, src) {
             if (resolved) return;
             resolved = true;
             clearTimeout(globalTimeout);
             console.log(`[v15] ✅ VIDEO (${src}):`, vUrl);
 
-            // Salva il referer per il proxy
+            // Raccoglie cookie prima di rispondere al client
+            let cookieStr = '';
+            try {
+                const cookies = await page.cookies();
+                cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+                console.log(`[v15] Cookie raccolti: ${cookies.length} → ${cookieStr.substring(0, 120)}`);
+            } catch(e) {
+                console.log('[v15] Cookie error:', e.message);
+            }
+
             cookieCache.set(url, {
-                cookieStr: '', // verrà popolato dopo
+                cookieStr,
                 referer: new URL(url).origin + '/',
                 ts: Date.now(),
             });
 
-            // Raccogli cookie in modo asincrono senza bloccare la risposta
+            // Ora risponde: i cookie sono già in cache quando il client chiama /proxy
             res.json({ success: true, video_url: vUrl });
-
-            // Raccogli cookie DOPO aver risposto
-            page.cookies()
-                .then(cookies => {
-                    const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-                    console.log(`[v15] Cookie raccolti: ${cookies.length} → ${cookieStr.substring(0, 100)}`);
-                    const entry = cookieCache.get(url);
-                    if (entry) entry.cookieStr = cookieStr;
-                })
-                .catch(e => console.log('[v15] Cookie error:', e.message))
-                .finally(() => {
-                    setTimeout(() => browser.close().catch(() => {}), 500);
-                });
+            setTimeout(() => browser.close().catch(() => {}), 500);
         }
 
         await page.setRequestInterception(true);
@@ -132,16 +129,15 @@ app.post('/extract', async (req, res) => {
                 return;
             }
             if (request.resourceType() === 'media') {
-                console.log('[v15] Media bloccato (risorsa):', u.substring(0, 80));
-                // Non abortire subito - potrebbe essere il video
-                if (!resolved) resolveVideo(u, 'media-resource');
+                console.log('[v15] Media (risorsa):', u.substring(0, 80));
                 try { request.abort(); } catch(e) {}
+                if (!resolved) resolveVideo(u, 'media-resource'); // async, non blocca
                 return;
             }
             if (!resolved && looksLikeVideo(u)) {
                 console.log('[v15] Video da network:', u.substring(0, 100));
-                resolveVideo(u, 'network');
                 try { request.abort(); } catch(e) {}
+                resolveVideo(u, 'network'); // async, non blocca
                 return;
             }
             try { request.continue(); } catch(e) {}
