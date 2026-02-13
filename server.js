@@ -359,3 +359,48 @@ app.get('/proxy', (req, res) => {
 
     proxyReq.end();
 });
+
+// ============================================================
+// FETCH-PAGE: scarica una pagina e la restituisce come testo
+// Usato da video-bridge.php quando Altervista blocca le connessioni
+// ============================================================
+app.get('/fetch-page', async (req, res) => {
+    const pageUrl = req.query.url;
+    if (!pageUrl) return res.status(400).send('URL mancante');
+
+    console.log('[fetch-page] Richiesta:', pageUrl.substring(0, 80));
+    res.setHeader('Access-Control-Allow-Origin', '*');
+
+    try {
+        const parsed = new URL(pageUrl);
+        const protocol = parsed.protocol === 'https:' ? https : http;
+
+        const options = {
+            hostname: parsed.hostname,
+            port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+            path: parsed.pathname + parsed.search,
+            method: 'GET',
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml',
+                'Accept-Language': 'it-IT,it;q=0.9',
+                'Referer': 'https://mixdrop.vip/',
+            },
+            timeout: 15000,
+        };
+
+        const proxyReq = protocol.request(options, (proxyRes) => {
+            res.setHeader('Content-Type', 'text/html; charset=utf-8');
+            res.status(proxyRes.statusCode);
+            proxyRes.pipe(res);
+        });
+        proxyReq.on('error', (e) => {
+            console.error('[fetch-page] Errore:', e.message);
+            res.status(502).send('');
+        });
+        proxyReq.on('timeout', () => { proxyReq.destroy(); res.status(504).send(''); });
+        proxyReq.end();
+    } catch(e) {
+        res.status(500).send('');
+    }
+});
