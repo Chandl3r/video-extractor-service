@@ -1,6 +1,10 @@
 const express = require('express');
-const puppeteer = require('puppeteer-core');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const chromium = require('@sparticuz/chromium');
+
+// Attiva il plugin stealth - bypassa reCAPTCHA, WebRTC fingerprint, ecc.
+puppeteer.use(StealthPlugin());
 
 const app = express();
 app.use(express.json());
@@ -15,18 +19,20 @@ app.use((req, res, next) => {
 });
 
 app.get('/', (req, res) => {
-    res.json({ status: 'ok', service: 'Video Extractor v5-debug' });
+    res.json({ status: 'ok', service: 'Video Extractor v6-stealth' });
 });
 
 const VIDEO_EXTS = ['.mp4', '.m3u8', '.webm', '.ts'];
 const BLOCK_TYPES = ['image', 'font', 'stylesheet'];
-const BLOCK_URLS  = ['google-analytics','googletagmanager','facebook','doubleclick','googlesyndication'];
+const BLOCK_URLS  = ['google-analytics','googletagmanager','doubleclick',
+                     'googlesyndication','hotjar','adsco.re','xadsmart',
+                     'adexchangeclear','flushpersist','usrpubtrk'];
 
 function looksLikeVideo(url) {
     const u = url.toLowerCase();
     if (u.includes('.js') || u.includes('.css') || u.includes('.png') ||
         u.includes('.jpg') || u.includes('.gif') || u.includes('.ico') ||
-        u.includes('.woff') || u.includes('analytics')) return false;
+        u.includes('.woff') || u.includes('analytics') || u.includes('recaptcha')) return false;
     return VIDEO_EXTS.some(e => u.includes(e));
 }
 
@@ -34,25 +40,18 @@ app.post('/extract', async (req, res) => {
     const { url } = req.body;
     if (!url) return res.json({ success: false, message: 'URL mancante' });
 
-    console.log('[v5] Estrazione:', url);
+    console.log('[v6] Estrazione:', url);
     let browser = null;
     let resolved = false;
-    let allRequests = []; // Log tutte le richieste per debug
 
     const globalTimeout = setTimeout(() => {
         if (!resolved) {
             resolved = true;
-            console.log('[v5] Timeout - richieste intercettate:', allRequests.length);
-            // Logga le ultime 20 richieste per capire cosa ha caricato
-            allRequests.slice(-20).forEach(r => console.log('[v5] req:', r));
+            console.log('[v6] Timeout 50s');
             if (browser) browser.close().catch(() => {});
-            res.json({ 
-                success: false, 
-                message: 'Timeout',
-                debug_requests: allRequests.slice(-30)
-            });
+            res.json({ success: false, message: 'Timeout: video non trovato' });
         }
-    }, 45000);
+    }, 50000);
 
     try {
         browser = await puppeteer.launch({
@@ -61,8 +60,7 @@ app.post('/extract', async (req, res) => {
                 '--no-sandbox', '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage', '--disable-gpu',
                 '--no-first-run', '--no-zygote', '--single-process',
-                '--disable-extensions', '--mute-audio',
-                '--disable-blink-features=AutomationControlled',
+                '--mute-audio',
             ],
             defaultViewport: { width: 1280, height: 720 },
             executablePath: await chromium.executablePath(),
@@ -73,12 +71,16 @@ app.post('/extract', async (req, res) => {
         const page = await browser.newPage();
         let videoUrl = null;
 
-        await page.evaluateOnNewDocument(() => {
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-            Object.defineProperty(navigator, 'languages', { get: () => ['it-IT', 'it', 'en-US', 'en'] });
-            window.chrome = { runtime: {} };
-        });
+        function resolveWithVideo(vUrl) {
+            if (!resolved) {
+                resolved = true;
+                videoUrl = vUrl;
+                console.log('[v6] ✅ VIDEO:', vUrl);
+                clearTimeout(globalTimeout);
+                res.json({ success: true, video_url: vUrl });
+                setImmediate(() => browser.close().catch(() => {}));
+            }
+        }
 
         await page.setRequestInterception(true);
 
@@ -86,37 +88,22 @@ app.post('/extract', async (req, res) => {
             const reqUrl = req.url();
             const resType = req.resourceType();
 
-            // Logga TUTTE le richieste (per debug)
-            allRequests.push(resType + ': ' + reqUrl.substring(0, 100));
-
             if (BLOCK_TYPES.includes(resType)) return req.abort();
             if (BLOCK_URLS.some(b => reqUrl.includes(b))) return req.abort();
 
-            if (!videoUrl && looksLikeVideo(reqUrl)) {
-                videoUrl = reqUrl;
-                console.log('[v5] ✅ VIDEO:', reqUrl);
-                clearTimeout(globalTimeout);
-                if (!resolved) {
-                    resolved = true;
-                    res.json({ success: true, video_url: videoUrl });
-                    setImmediate(() => browser.close().catch(() => {}));
-                }
+            if (!resolved && looksLikeVideo(reqUrl)) {
+                resolveWithVideo(reqUrl);
+                try { req.abort(); } catch(e) {}
+                return;
             }
             try { req.continue(); } catch(e) {}
         });
 
-        page.on('response', (response) => {
-            if (videoUrl || resolved) return;
+        page.on('response', async (response) => {
+            if (resolved) return;
             const ct = response.headers()['content-type'] || '';
             if (ct.includes('video/') || ct.includes('mpegurl')) {
-                videoUrl = response.url();
-                console.log('[v5] ✅ VIDEO (header):', videoUrl);
-                clearTimeout(globalTimeout);
-                if (!resolved) {
-                    resolved = true;
-                    res.json({ success: true, video_url: videoUrl });
-                    setImmediate(() => browser.close().catch(() => {}));
-                }
+                resolveWithVideo(response.url());
             }
         });
 
@@ -128,78 +115,83 @@ app.post('/extract', async (req, res) => {
             'sec-ch-ua-platform': '"Windows"',
         });
 
-        page.goto(url, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(e => {
-            console.log('[v5] goto error:', e.message.substring(0, 80));
+        page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(e => {
+            console.log('[v6] goto:', e.message.substring(0, 80));
         });
 
-        await sleep(3000);
+        // Aspetta che la pagina carichi e JS venga eseguito
+        await sleep(4000);
 
-        if (!videoUrl && !resolved) {
-            // Log stato pagina per debug
+        if (!resolved) {
+            console.log('[v6] Cerco nell\'HTML...');
             try {
-                const pageInfo = await page.evaluate(() => ({
-                    title: document.title,
-                    url: window.location.href,
-                    htmlLength: document.documentElement.innerHTML.length,
-                    hasVideo: document.querySelectorAll('video').length,
-                    bodyText: document.body?.innerText?.substring(0, 200) || '',
-                }));
-                console.log('[v5] Pagina:', JSON.stringify(pageInfo));
-            } catch(e) { console.log('[v5] eval error:', e.message); }
-
-            // Cerca video nell'HTML
-            try {
-                videoUrl = await page.evaluate(() => {
+                const result = await page.evaluate(() => {
+                    // Tag video
                     for (const v of document.querySelectorAll('video')) {
-                        if (v.src?.startsWith('http')) return v.src;
+                        if (v.src?.startsWith('http')) return { type: 'video_tag', url: v.src };
                         const s = v.querySelector('source[src]');
-                        if (s?.src?.startsWith('http')) return s.src;
+                        if (s?.src?.startsWith('http')) return { type: 'source_tag', url: s.src };
                     }
+                    // Script inline - pattern comuni
                     const patterns = [
                         /MDCore\.wurl\s*=\s*["']([^"']+)["']/,
                         /wurl\s*[=:]\s*["']([^"']+)["']/,
                         /file\s*:\s*["'](https?:[^"']+\.mp4[^"']*)["']/i,
                         /file\s*:\s*["'](https?:[^"']+\.m3u8[^"']*)["']/i,
                         /"(https?:\/\/[^"]{15,}\.mp4[^"]*)"/,
+                        /"(https?:\/\/[^"]{15,}\.m3u8[^"]*)"/,
                     ];
                     for (const s of document.querySelectorAll('script:not([src])')) {
                         for (const p of patterns) {
                             const m = s.textContent.match(p);
-                            if (m) return m[1].startsWith('//') ? 'https:' + m[1] : m[1];
+                            if (m) {
+                                const u = m[1].startsWith('//') ? 'https:' + m[1] : m[1];
+                                return { type: 'script', url: u };
+                            }
                         }
                     }
-                    return null;
+                    return { 
+                        type: 'not_found',
+                        title: document.title,
+                        htmlLength: document.documentElement.innerHTML.length,
+                        scripts: Array.from(document.querySelectorAll('script:not([src])')).length
+                    };
                 });
-            } catch(e) {}
-
-            if (videoUrl) {
-                console.log('[v5] ✅ VIDEO (HTML):', videoUrl);
-                clearTimeout(globalTimeout);
-                if (!resolved) {
-                    resolved = true;
-                    res.json({ success: true, video_url: videoUrl });
-                    setImmediate(() => browser.close().catch(() => {}));
+                
+                console.log('[v6] Risultato HTML:', JSON.stringify(result));
+                
+                if (result.url) {
+                    resolveWithVideo(result.url);
+                    return;
                 }
-                return;
-            }
+            } catch(e) { console.log('[v6] eval error:', e.message); }
+        }
 
-            // Premi Play
-            console.log('[v5] Provo Play...');
+        // Premi Play
+        if (!resolved) {
+            console.log('[v6] Provo Play...');
             const selectors = [
                 '.jw-icon-display', '.vjs-big-play-button', '[aria-label="Play"]',
-                '.plyr__control--overlaid', 'button[class*="play"]',
+                '.plyr__control--overlaid', '.jwplayer .jw-display-icon-container',
+                'button[class*="play"]', '.play', '#play',
             ];
             for (const sel of selectors) {
                 try {
                     const btn = await page.$(sel);
-                    if (btn) { await btn.click(); console.log('[v5] Click:', sel); await sleep(4000); break; }
+                    if (btn) {
+                        await btn.click();
+                        console.log('[v6] Click:', sel);
+                        await sleep(5000);
+                        break;
+                    }
                 } catch(e) {}
             }
+            // Click centro
             try { await page.mouse.click(640, 360); await sleep(3000); } catch(e) {}
         }
 
     } catch (error) {
-        console.error('[v5] Errore:', error.message);
+        console.error('[v6] Errore:', error.message);
         clearTimeout(globalTimeout);
         if (!resolved) {
             resolved = true;
@@ -212,4 +204,4 @@ app.post('/extract', async (req, res) => {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v5-debug porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v6-stealth porta ${PORT}`));
