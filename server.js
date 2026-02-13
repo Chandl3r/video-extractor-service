@@ -263,3 +263,49 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Video Extractor v12 porta ${PORT}`));
+
+// ============================================================
+// PROXY ENDPOINT: serve il video al browser dell'utente
+// Il browser chiede /proxy?url=... e Render scarica e riversa
+// ============================================================
+const https = require('https');
+const http = require('http');
+
+app.get('/proxy', (req, res) => {
+    const videoUrl = req.query.url;
+    if (!videoUrl) return res.status(400).send('URL mancante');
+
+    console.log('[proxy] Richiesta proxy per:', videoUrl.substring(0, 80));
+
+    const parsed = new URL(videoUrl);
+    const protocol = parsed.protocol === 'https:' ? https : http;
+
+    const options = {
+        hostname: parsed.hostname,
+        path: parsed.pathname + parsed.search,
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://mixdrop.vip/',
+            'Range': req.headers['range'] || '',
+        }
+    };
+
+    const proxyReq = protocol.get(options, (proxyRes) => {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Content-Type', proxyRes.headers['content-type'] || 'video/mp4');
+        if (proxyRes.headers['content-length']) {
+            res.setHeader('Content-Length', proxyRes.headers['content-length']);
+        }
+        if (proxyRes.headers['content-range']) {
+            res.setHeader('Content-Range', proxyRes.headers['content-range']);
+        }
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.status(proxyRes.statusCode || 200);
+        proxyRes.pipe(res);
+    });
+
+    proxyReq.on('error', (err) => {
+        console.error('[proxy] Errore:', err.message);
+        res.status(500).send('Errore proxy');
+    });
+});
