@@ -265,47 +265,97 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Video Extractor v12 porta ${PORT}`));
 
 // ============================================================
-// PROXY ENDPOINT: serve il video al browser dell'utente
-// Il browser chiede /proxy?url=... e Render scarica e riversa
+// PROXY ENDPOINT: serve il video al browser
+// Gestisce correttamente Range requests per lo streaming
 // ============================================================
 const https = require('https');
 const http = require('http');
+
+app.options('/proxy', (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.status(200).end();
+});
 
 app.get('/proxy', (req, res) => {
     const videoUrl = req.query.url;
     if (!videoUrl) return res.status(400).send('URL mancante');
 
-    console.log('[proxy] Richiesta proxy per:', videoUrl.substring(0, 80));
+    console.log('[proxy] Richiesta:', videoUrl.substring(0, 80), '| Range:', req.headers['range'] || 'nessuno');
 
-    const parsed = new URL(videoUrl);
+    let parsed;
+    try { parsed = new URL(videoUrl); } catch(e) {
+        return res.status(400).send('URL non valido');
+    }
+
     const protocol = parsed.protocol === 'https:' ? https : http;
+
+    // Costruisci headers per la richiesta upstream
+    const upstreamHeaders = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://mixdrop.vip/',
+        'Origin': 'https://mixdrop.vip',
+        'Accept': '*/*',
+        'Accept-Language': 'it-IT,it;q=0.9',
+        'Connection': 'keep-alive',
+    };
+
+    // Passa Range header se presente (essenziale per video seeking)
+    if (req.headers['range']) {
+        upstreamHeaders['Range'] = req.headers['range'];
+    }
 
     const options = {
         hostname: parsed.hostname,
+        port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
         path: parsed.pathname + parsed.search,
-        headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': 'https://mixdrop.vip/',
-            'Range': req.headers['range'] || '',
-        }
+        method: 'GET',
+        headers: upstreamHeaders,
+        timeout: 30000,
     };
 
-    const proxyReq = protocol.get(options, (proxyRes) => {
+    const proxyReq = protocol.request(options, (proxyRes) => {
+        console.log('[proxy] Risposta upstream:', proxyRes.statusCode, 
+                    '| Content-Type:', proxyRes.headers['content-type'],
+                    '| Content-Length:', proxyRes.headers['content-length']);
+
+        // Headers CORS obbligatori
         res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Content-Type', proxyRes.headers['content-type'] || 'video/mp4');
-        if (proxyRes.headers['content-length']) {
-            res.setHeader('Content-Length', proxyRes.headers['content-length']);
-        }
-        if (proxyRes.headers['content-range']) {
-            res.setHeader('Content-Range', proxyRes.headers['content-range']);
-        }
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
+
+        // Propaga tutti gli header importanti
+        const headersToPass = [
+            'content-type', 'content-length', 'content-range',
+            'accept-ranges', 'last-modified', 'etag', 'cache-control'
+        ];
+        headersToPass.forEach(h => {
+            if (proxyRes.headers[h]) res.setHeader(h, proxyRes.headers[h]);
+        });
+
+        // Assicura Accept-Ranges per il seeking
         res.setHeader('Accept-Ranges', 'bytes');
-        res.status(proxyRes.statusCode || 200);
-        proxyRes.pipe(res);
+
+        res.writeHead(proxyRes.statusCode);
+        proxyRes.pipe(res, { end: true });
+
+        proxyRes.on('error', (err) => {
+            console.error('[proxy] Stream error:', err.message);
+        });
+    });
+
+    proxyReq.on('timeout', () => {
+        proxyReq.destroy();
+        if (!res.headersSent) res.status(504).send('Gateway timeout');
     });
 
     proxyReq.on('error', (err) => {
-        console.error('[proxy] Errore:', err.message);
-        res.status(500).send('Errore proxy');
+        console.error('[proxy] Errore richiesta:', err.message);
+        if (!res.headersSent) res.status(502).send('Errore proxy: ' + err.message);
     });
+
+    // Gestisci disconnessione del client
+    req.on('close', () => proxyReq.destroy());
+
+    proxyReq.end();
 });
