@@ -104,12 +104,21 @@ app.post('/extract', async (req, res) => {
                 try { request.abort(); } catch(e) {}
                 if (!resolved) {
                     resolved = true; clearTimeout(globalTimeout);
-                    // Naviga a about:blank: libera DOM mixdrop (~80MB), nessuna CSP
-                    page.goto('about:blank').then(() => {
-                        console.log('[v35] ✅ about:blank OK - DOM liberato, pronto per fetch');
-                    }).catch(() => {});
-                    sessions.set(url, { videoUrl: u, browser, blankPage: page, ts: Date.now() });
-                    res.json({ success: true, video_url: u });
+                    // Aspetta about:blank PRIMA di rispondere al client
+                    // Senza await il proxy arriva quando la pagina è ancora mixdrop → Failed to fetch
+                    page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 })
+                        .then(() => {
+                            console.log('[v35] ✅ about:blank pronto');
+                            sessions.set(url, { videoUrl: u, browser, blankPage: page, ts: Date.now() });
+                            res.json({ success: true, video_url: u });
+                        })
+                        .catch(() => {
+                            // about:blank fallisce raramente, rispondi comunque con piccolo delay
+                            setTimeout(() => {
+                                sessions.set(url, { videoUrl: u, browser, blankPage: page, ts: Date.now() });
+                                res.json({ success: true, video_url: u });
+                            }, 1000);
+                        });
                 }
                 return;
             }
@@ -194,12 +203,12 @@ app.get('/proxy', async (req, res) => {
     }
 
     // Rispetta range del player, max 256KB per chunk
-    let start = 0, end = 262143;
+    let start = 0, end = 65535;
     if (rangeHeader) {
         const m = rangeHeader.match(/bytes=(\d+)-(\d*)/);
         if (m) {
             start = parseInt(m[1]);
-            end = m[2] ? Math.min(parseInt(m[2]), start + 262143) : start + 262143;
+            end = m[2] ? Math.min(parseInt(m[2]), start + 65535) : start + 65535;
         }
     }
     const rangeStr = `bytes=${start}-${end}`;
