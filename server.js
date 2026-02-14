@@ -178,93 +178,19 @@ app.post('/extract', async (req, res) => {
 });
 
 // ============================================================
-// PROXY: usa CDP Network.getResponseBody (body già scaricato da Chrome)
-// oppure fa nuova richiesta via page.evaluate/fetch (Chrome TLS)
+// PROXY: redirect diretto al video URL
+// Il token non è IP-locked, qualsiasi browser Chrome può accedervi.
+// Node.js dava 403 solo per TLS fingerprinting, il browser utente non ha quel problema.
 // ============================================================
 app.get('/proxy', async (req, res) => {
     const { url: videoUrl, src: embedSrc } = req.query;
     if (!videoUrl) return res.status(400).send('URL mancante');
 
-    const session = embedSrc ? sessions.get(embedSrc) : null;
-    const rangeHeader = req.headers['range'];
-    console.log(`[proxy] ${videoUrl.substring(0,70)} | Range: ${rangeHeader||'nessuno'} | Session: ${session?'sì':'no'}`);
-
-    if (!session) {
-        return res.status(503).json({ error: 'Sessione scaduta, ri-estrai il video' });
-    }
-
-    try {
-        const { page, cdpClient } = session;
-
-        // Strategia: usa page.evaluate per fare fetch() direttamente in Chrome
-        // Chrome usa il suo TLS, la sua sessione, gli stessi cookie
-        console.log('[proxy] Fetch tramite Chrome (page.evaluate)...');
-
-        const fetchOptions = {
-            url: videoUrl,
-            rangeHeader: rangeHeader || null
-        };
-
-        // Lancia il fetch dentro Chrome e ottieni il risultato come base64
-        // Limitiamo a 50MB per non crashare la RAM
-        const MAX_BYTES = 50 * 1024 * 1024;
-
-        const result = await page.evaluate(async (opts) => {
-            try {
-                const headers = { 'Accept': '*/*' };
-                if (opts.rangeHeader) headers['Range'] = opts.rangeHeader;
-
-                const r = await fetch(opts.url, {
-                    headers,
-                    credentials: 'include', // include cookies della sessione!
-                });
-
-                if (!r.ok && r.status !== 206) {
-                    return { error: true, status: r.status, message: `HTTP ${r.status}` };
-                }
-
-                const contentType = r.headers.get('content-type') || 'video/mp4';
-                const contentLength = r.headers.get('content-length');
-                const contentRange = r.headers.get('content-range');
-                const status = r.status;
-
-                // Leggi come ArrayBuffer e converti a base64
-                const ab = await r.arrayBuffer();
-                const bytes = new Uint8Array(ab);
-                let binary = '';
-                const chunkSize = 8192;
-                for (let i = 0; i < bytes.length; i += chunkSize) {
-                    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
-                }
-                const base64 = btoa(binary);
-
-                return { error: false, status, contentType, contentLength, contentRange, base64, bytes: bytes.length };
-            } catch(e) {
-                return { error: true, message: e.message };
-            }
-        }, fetchOptions);
-
-        if (result.error) {
-            console.error('[proxy] Chrome fetch error:', result.message || result.status);
-            return res.status(result.status || 502).send(result.message || 'Fetch fallito');
-        }
-
-        console.log(`[proxy] Chrome fetch OK: ${result.status} | ${result.contentType} | ${result.bytes} bytes`);
-
-        const buffer = Buffer.from(result.base64, 'base64');
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Accept-Ranges', 'bytes');
-        res.setHeader('Content-Type', result.contentType);
-        res.setHeader('Content-Length', buffer.length);
-        if (result.contentRange) res.setHeader('Content-Range', result.contentRange);
-        res.status(result.status).send(buffer);
-
-        session.ts = Date.now();
-
-    } catch(e) {
-        console.error('[proxy] ERRORE:', e.message);
-        if (!res.headersSent) res.status(500).send('Errore: ' + e.message);
-    }
+    console.log(`[proxy] Redirect a: ${videoUrl.substring(0,80)}`);
+    
+    // Redirect diretto: il browser dell'utente accede con il suo TLS Chrome → 200 ✅
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.redirect(302, videoUrl);
 });
 
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
