@@ -36,12 +36,13 @@ function looksLikeVideo(url) {
 }
 
 // Args senza --single-process (causa crash con più tab/browser)
-function getBrowserArgs() {
-    const args = chromium.args.filter(a => a !== '--single-process');
-    return [...args, '--no-sandbox', '--disable-setuid-sandbox',
+function getBrowserArgs(singleProcess = true) {
+    // singleProcess=true per extract (meno RAM), false per proxy (CDP ha bisogno di multiprocess)
+    const base = chromium.args.filter(a => a !== '--single-process');
+    const sp = singleProcess ? ['--single-process'] : [];
+    return [...base, ...sp, '--no-sandbox', '--disable-setuid-sandbox',
             '--disable-dev-shm-usage', '--disable-gpu', '--no-first-run',
-            '--no-zygote', '--mute-audio', '--disable-blink-features=AutomationControlled',
-            '--disable-web-security', '--allow-running-insecure-content'];
+            '--no-zygote', '--mute-audio', '--disable-blink-features=AutomationControlled'];
 }
 
 // ============================================================
@@ -75,7 +76,7 @@ app.post('/extract', async (req, res) => {
         console.log('[v21] execPath:', execPath ? 'OK' : 'NULL');
         
         browser = await puppeteer.launch({
-            args: getBrowserArgs(),
+            args: getBrowserArgs(true), // single-process: meno RAM
             defaultViewport: { width: 1280, height: 720 },
             executablePath: execPath,
             headless: chromium.headless,
@@ -185,7 +186,7 @@ app.get('/proxy', async (req, res) => {
         const execPath = await chromium.executablePath();
         console.log('[proxy] Avvio browser proxy...');
         browser = await puppeteer.launch({
-            args: getBrowserArgs(),
+            args: getBrowserArgs(false), // multiprocess per CDP streaming
             defaultViewport: { width: 1280, height: 720 },
             executablePath: execPath,
             headless: chromium.headless,
