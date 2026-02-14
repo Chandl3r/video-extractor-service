@@ -178,20 +178,86 @@ app.post('/extract', async (req, res) => {
 });
 
 // ============================================================
-// PROXY: redirect diretto al video URL
-// Il token non è IP-locked, qualsiasi browser Chrome può accedervi.
-// Node.js dava 403 solo per TLS fingerprinting, il browser utente non ha quel problema.
+// PROXY: streaming in chunk da 1MB usando Chrome (TLS corretto)
 // ============================================================
 app.get('/proxy', async (req, res) => {
     const { url: videoUrl, src: embedSrc } = req.query;
     if (!videoUrl) return res.status(400).send('URL mancante');
 
-    console.log(`[proxy] Redirect a: ${videoUrl.substring(0,80)}`);
-    
-    // Redirect diretto: il browser dell'utente accede con il suo TLS Chrome → 200 ✅
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.redirect(302, videoUrl);
+    const session = embedSrc ? sessions.get(embedSrc) : null;
+    const rangeHeader = req.headers['range'];
+    console.log(`[proxy] ${videoUrl.substring(0,70)} | Range: ${rangeHeader||'nessuno'} | Session: ${session?'sì':'no'}`);
+
+    if (!session || !session.page) {
+        return res.status(503).json({ error: 'Sessione scaduta, ricarica la pagina' });
+    }
+
+    try {
+        const { page } = session;
+
+        // Calcola il range richiesto (default: 0-1MB)
+        let rangeStart = 0, rangeEnd = 1024 * 1024 - 1; // 1MB
+        if (rangeHeader) {
+            const m = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+            if (m) {
+                rangeStart = parseInt(m[1]);
+                rangeEnd = m[2] ? parseInt(m[2]) : rangeStart + 1024*1024 - 1;
+            }
+        }
+
+        console.log(`[proxy] Fetch Chrome range: ${rangeStart}-${rangeEnd}`);
+
+        // Fetch in Chrome con range specifico - chunk piccolo = no timeout
+        const result = await Promise.race([
+            page.evaluate(async (opts) => {
+                try {
+                    const r = await fetch(opts.url, {
+                        headers: { 'Range': `bytes=${opts.start}-${opts.end}` },
+                        credentials: 'include',
+                    });
+                    const status = r.status;
+                    const ct = r.headers.get('content-type') || 'video/mp4';
+                    const cr = r.headers.get('content-range') || '';
+                    const cl = r.headers.get('content-length') || '';
+                    const ab = await r.arrayBuffer();
+                    const bytes = new Uint8Array(ab);
+                    // Converti a base64 in chunk per evitare stack overflow
+                    let binary = '';
+                    const chunkSz = 8192;
+                    for (let i = 0; i < bytes.length; i += chunkSz) {
+                        binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i+chunkSz, bytes.length)));
+                    }
+                    return { ok: true, status, ct, cr, cl, b64: btoa(binary), len: bytes.length };
+                } catch(e) {
+                    return { ok: false, error: e.message };
+                }
+            }, { url: videoUrl, start: rangeStart, end: rangeEnd }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout 25s')), 25000))
+        ]);
+
+        if (!result.ok) {
+            console.error('[proxy] Chrome fetch error:', result.error);
+            return res.status(502).send('Errore fetch: ' + result.error);
+        }
+
+        console.log(`[proxy] Chrome fetch OK: ${result.status} | ${result.len} bytes | ${result.ct}`);
+
+        const buf = Buffer.from(result.b64, 'base64');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Content-Type', result.ct || 'video/mp4');
+        res.setHeader('Content-Length', buf.length);
+        if (result.cr) res.setHeader('Content-Range', result.cr);
+        res.status(result.status === 206 ? 206 : 200).send(buf);
+
+        session.ts = Date.now();
+
+    } catch(e) {
+        console.error('[proxy] ERRORE:', e.message);
+        if (!res.headersSent) res.status(500).send('Errore: ' + e.message);
+    }
 });
+
 
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
 const PORT=process.env.PORT||3000;
