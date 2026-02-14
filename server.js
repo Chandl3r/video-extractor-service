@@ -65,31 +65,22 @@ app.post('/extract', async (req, res) => {
             Object.defineProperty(navigator, 'languages', { get: () => ['it-IT', 'it', 'en-US'] });
         });
 
-        // Blocca solo risorse pesanti ma NON intercettare il video
         await page.setRequestInterception(true);
         page.on('request', (request) => {
             const u = request.url();
-            // Blocca solo tracker/ads pesanti
+            // Blocca tracker/ads
             if (BLOCK_URLS.some(b => u.includes(b))) {
                 try { request.abort(); } catch(e) {}
                 return;
             }
-            // Blocca il download effettivo del video appena inizia
-            // (abort DOPO aver rilevato l'URL, per non consumare il token)
-            if (resolved && looksLikeVideo(u)) {
-                try { request.abort(); } catch(e) {}
+            // Rilevato video: cattura URL e ABORTA (token non consumato!)
+            if (looksLikeVideo(u)) {
+                console.log('[v19] URL video rilevato:', u.substring(0, 90));
+                try { request.abort(); } catch(e) {} // abort prima di resolveWithUrl
+                if (!resolved) resolveWithUrl(u);
                 return;
             }
             try { request.continue(); } catch(e) {}
-        });
-
-        // OSSERVAZIONE PASSIVA: rileva l'URL dal network prima che Chrome scarichi
-        page.on('request', (request) => {
-            const u = request.url();
-            if (!resolved && looksLikeVideo(u)) {
-                console.log('[v19] URL video rilevato (request):', u.substring(0, 90));
-                resolveWithUrl(u);
-            }
         });
 
         page.on('response', (response) => {
