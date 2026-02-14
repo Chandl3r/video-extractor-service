@@ -189,7 +189,9 @@ app.get('/proxy', async (req, res) => {
 
         cdp.on('Fetch.requestPaused', async (event) => {
             const status = event.responseStatusCode;
-            console.log(`[proxy] CDP intercettato: status=${status} | CT=${(event.responseHeaders||[]).find(h=>h.name.toLowerCase()==='content-type')?.value||'?'}`);
+            const ct = (event.responseHeaders||[]).find(h=>h.name.toLowerCase()==='content-type')?.value||'?';
+            const cl = (event.responseHeaders||[]).find(h=>h.name.toLowerCase()==='content-length')?.value||'?';
+            console.log(`[proxy] CDP intercettato: url=${event.request?.url?.substring(0,60)} status=${status} CT=${ct} CL=${cl}`);
             if (status && status < 400) {
                 try {
                     const { stream } = await cdp.send('Fetch.takeResponseBodyAsStream', { requestId: event.requestId });
@@ -207,9 +209,10 @@ app.get('/proxy', async (req, res) => {
         });
 
         // Naviga all'URL video - Chrome fa la richiesta con il suo TLS dal suo IP
-        console.log('[proxy] Chrome naviga al video...');
+        console.log('[proxy] Chrome naviga al video:', videoUrl.substring(0, 80));
+        console.log('[proxy] Referer impostato:', embedSrc ? embedSrc.substring(0,60) : 'nessuno');
         videoPage.goto(videoUrl, { waitUntil: 'commit', timeout: 20000 }).catch(e => {
-            console.log('[proxy] goto video:', e.message.substring(0, 60));
+            console.log('[proxy] goto video warning:', e.message.substring(0, 80));
         });
 
         // Attendi la risposta (max 25s)
