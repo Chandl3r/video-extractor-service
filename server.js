@@ -248,13 +248,13 @@ app.get('/proxy', async (req, res) => {
         });
 
         console.log('[proxy] Navigazione al video...');
-        page.goto(videoUrl, { waitUntil: 'commit', timeout: 20000 }).catch(e => {
+        page.goto(videoUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(e => {
             console.log('[proxy] goto warning:', e.message.substring(0, 80));
         });
 
         const result = await Promise.race([
             streamReady,
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout 25s in attesa CDP')), 25000))
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout 40s in attesa CDP')), 40000))
         ]);
 
         if (result.error) {
