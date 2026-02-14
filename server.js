@@ -91,23 +91,23 @@ app.post('/extract', async (req, res) => {
             window.chrome = { runtime: {} };
         });
 
+        let interceptorDone = false;
         await page.setRequestInterception(true);
         page.on('request', (request) => {
+            // Se abbiamo già trovato il video, lascia passare tutto (evita crash)
+            if (interceptorDone) { try { request.continue(); } catch(e) {} return; }
             const u = request.url();
             if (BLOCK_URLS.some(b => u.includes(b))) { try{request.abort();}catch(e){} return; }
             if (looksLikeVideo(u)) {
                 console.log('[v35] Video rilevato:', u.substring(0, 80));
+                interceptorDone = true; // stop: tutte le richieste successive passano
                 try { request.abort(); } catch(e) {}
                 if (!resolved) {
                     resolved = true; clearTimeout(globalTimeout);
-
-                    // FIX CRITICO: disabilita interception PRIMA di navigare a about:blank
-                    // Senza questo, il fetch() nel proxy viene abortito dal nostro stesso interceptor!
-                    page.setRequestInterception(false).catch(() => {});
+                    // Naviga a about:blank: libera DOM mixdrop (~80MB), nessuna CSP
                     page.goto('about:blank').then(() => {
-                        console.log('[v35] ✅ about:blank OK - interception OFF, DOM liberato');
+                        console.log('[v35] ✅ about:blank OK - DOM liberato, pronto per fetch');
                     }).catch(() => {});
-
                     sessions.set(url, { videoUrl: u, browser, blankPage: page, ts: Date.now() });
                     res.json({ success: true, video_url: u });
                 }
@@ -131,6 +131,7 @@ app.post('/extract', async (req, res) => {
             if (q && !resolved) {
                 resolved = true; clearTimeout(globalTimeout);
                 page.setRequestInterception(false).catch(() => {});
+                interceptorDone = true;
                 page.goto('about:blank').catch(() => {});
                 sessions.set(url, { videoUrl: q, browser, blankPage: page, ts: Date.now() });
                 res.json({ success: true, video_url: q });
@@ -151,6 +152,7 @@ app.post('/extract', async (req, res) => {
                 if (v && !resolved) {
                     resolved = true; clearTimeout(globalTimeout);
                     page.setRequestInterception(false).catch(() => {});
+                    interceptorDone = true;
                     page.goto('about:blank').catch(() => {});
                     sessions.set(url, { videoUrl: v, browser, blankPage: page, ts: Date.now() });
                     res.json({ success: true, video_url: v });
