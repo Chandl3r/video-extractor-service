@@ -17,309 +17,235 @@ app.use((req, res, next) => {
     next();
 });
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v15' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v16' }));
 
-// Cache cookie per il proxy
-const cookieCache = new Map(); // embedUrl → { cookieStr, referer, ts }
+// Cache: embedUrl → { videoUrl, cdnCookies, referer, ts }
+// cdnCookies = cookie che Puppeteer riceve da mxcontent.net (non da mixdrop.vip)
+const videoCache = new Map();
 setInterval(() => {
     const now = Date.now();
-    for (const [k, v] of cookieCache) {
-        if (now - v.ts > 10 * 60 * 1000) cookieCache.delete(k);
+    for (const [k, v] of videoCache) {
+        if (now - v.ts > 8*60*1000) videoCache.delete(k);
     }
 }, 60000);
 
-const VIDEO_EXTS = ['.mp4', '.m3u8', '.webm', '.ts'];
+const VIDEO_EXTS = ['.mp4','.m3u8','.webm','.ts'];
 const BLOCK_URLS = ['google-analytics','googletagmanager','doubleclick',
                     'googlesyndication','adsco.re','xadsmart','usrpubtrk',
-                    'adexchangeclear','flushpersist','facebook.net','hotjar'];
+                    'adexchangeclear','facebook.net'];
 
 function looksLikeVideo(url) {
     const u = url.toLowerCase();
-    if (['.js','.css','.png','.jpg','.gif','.ico','.woff',
-         'analytics','recaptcha','adsco'].some(x => u.includes(x))) return false;
-    return VIDEO_EXTS.some(e => u.includes(e));
+    if (['.js','.css','.png','.jpg','.gif','.ico','.woff','analytics','recaptcha','adsco'].some(x=>u.includes(x))) return false;
+    return VIDEO_EXTS.some(e=>u.includes(e));
 }
 
 app.post('/extract', async (req, res) => {
     const { url } = req.body;
     if (!url) return res.json({ success: false, message: 'URL mancante' });
 
-    console.log('[v15] === INIZIO ESTRAZIONE:', url);
-    let browser = null;
-    let resolved = false;
+    console.log('[v16] ESTRAZIONE:', url);
+    let browser = null, resolved = false;
 
     const globalTimeout = setTimeout(() => {
-        console.log('[v15] ⏰ TIMEOUT GLOBALE');
         if (!resolved) {
             resolved = true;
-            if (browser) browser.close().catch(() => {});
+            if (browser) browser.close().catch(()=>{});
             res.json({ success: false, message: 'Timeout' });
         }
     }, 70000);
 
     try {
-        console.log('[v15] Avvio Chromium...');
-        const execPath = await chromium.executablePath();
-        console.log('[v15] execPath:', execPath ? execPath.substring(0, 50) : 'NULL');
-
         browser = await puppeteer.launch({
-            args: [
-                ...chromium.args,
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--no-first-run',
-                '--no-zygote',
-                '--single-process',
-                '--mute-audio',
-                '--disable-blink-features=AutomationControlled',
-            ],
+            args: [...chromium.args,
+                   '--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage',
+                   '--disable-gpu','--no-first-run','--no-zygote','--single-process',
+                   '--mute-audio','--disable-blink-features=AutomationControlled'],
             defaultViewport: { width: 1280, height: 720 },
-            executablePath: execPath,
+            executablePath: await chromium.executablePath(),
             headless: chromium.headless,
             ignoreHTTPSErrors: true,
         });
-        console.log('[v15] Browser avviato ✅');
 
         const page = await browser.newPage();
-        console.log('[v15] Nuova pagina creata');
-
         await page.evaluateOnNewDocument(() => {
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            window.chrome = { runtime: {} };
-            Object.defineProperty(navigator, 'languages', { get: () => ['it-IT', 'it', 'en-US'] });
-            Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
+            Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
+            window.chrome={runtime:{}};
+            Object.defineProperty(navigator,'languages',{get:()=>['it-IT','it','en-US']});
+            Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5]});
         });
 
-        // Risoluzione ASINCRONA: raccoglie cookie PRIMA di rispondere
+        // Tiene traccia dei cookie ricevuti da mxcontent.net
+        // (intercettando le response del CDN durante la sessione Puppeteer)
+        const cdnResponseHeaders = {};
+
         async function resolveVideo(vUrl, src) {
             if (resolved) return;
             resolved = true;
             clearTimeout(globalTimeout);
-            console.log(`[v15] ✅ VIDEO (${src}):`, vUrl);
+            console.log(`[v16] VIDEO (${src}):`, vUrl);
 
-            // Raccoglie cookie prima di rispondere al client
-            let cookieStr = '';
+            // Raccoglie cookie di mixdrop (per referer auth)
+            const allCookies = await page.cookies().catch(()=>[]);
+            const mixdropCookies = allCookies.map(c=>`${c.name}=${c.value}`).join('; ');
+            console.log(`[v16] Cookies mixdrop: ${allCookies.length}`);
+
+            // Estrai il dominio CDN per i cookie specifici
+            let cdnCookieStr = '';
             try {
-                const cookies = await page.cookies();
-                cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-                console.log(`[v15] Cookie raccolti: ${cookies.length} → ${cookieStr.substring(0, 120)}`);
-            } catch(e) {
-                console.log('[v15] Cookie error:', e.message);
-            }
+                const cdnHost = new URL(vUrl).hostname;
+                const cdnCookies = await page.cookies(vUrl).catch(()=>[]);
+                cdnCookieStr = cdnCookies.map(c=>`${c.name}=${c.value}`).join('; ');
+                console.log(`[v16] Cookies CDN (${cdnHost}): ${cdnCookies.length}`);
+            } catch(e) {}
 
-            cookieCache.set(url, {
-                cookieStr,
-                referer: url,  // URL completo dell'embed, non solo origin
+            videoCache.set(url, {
+                videoUrl: vUrl,
+                mixdropCookies,
+                cdnCookieStr,
+                referer: url,
+                responseHeaders: cdnResponseHeaders,
                 ts: Date.now(),
             });
 
-            // Ora risponde: i cookie sono già in cache quando il client chiama /proxy
             res.json({ success: true, video_url: vUrl });
-            setTimeout(() => browser.close().catch(() => {}), 500);
+            setImmediate(() => browser.close().catch(()=>{}));
         }
 
         await page.setRequestInterception(true);
 
         page.on('request', (request) => {
             const u = request.url();
-            if (BLOCK_URLS.some(b => u.includes(b))) {
-                try { request.abort(); } catch(e) {}
-                return;
-            }
-            if (request.resourceType() === 'media') {
-                console.log('[v15] Media (risorsa):', u.substring(0, 80));
-                try { request.abort(); } catch(e) {}
-                if (!resolved) resolveVideo(u, 'media-resource'); // async, non blocca
+            if (BLOCK_URLS.some(b=>u.includes(b))) { try{request.abort();}catch(e){} return; }
+            if (request.resourceType()==='media') {
+                console.log('[v16] Media:', u.substring(0,80));
+                try{request.abort();}catch(e){}
+                if (!resolved) resolveVideo(u,'media');
                 return;
             }
             if (!resolved && looksLikeVideo(u)) {
-                console.log('[v15] Video da network:', u.substring(0, 100));
-                try { request.abort(); } catch(e) {}
-                resolveVideo(u, 'network'); // async, non blocca
+                console.log('[v16] Video network:', u.substring(0,80));
+                try{request.abort();}catch(e){}
+                resolveVideo(u,'network');
                 return;
             }
-            try { request.continue(); } catch(e) {}
+            try{request.continue();}catch(e){}
         });
 
-        page.on('response', (response) => {
+        page.on('response', (r) => {
             if (resolved) return;
-            const ct = response.headers()['content-type'] || '';
-            const u = response.url();
-            if (ct.includes('video/') || ct.includes('mpegurl') || ct.includes('octet-stream')) {
-                if (looksLikeVideo(u)) {
-                    console.log('[v15] Video da response:', u.substring(0, 100));
-                    resolveVideo(u, 'response');
-                }
-            }
+            const u = r.url();
+            const ct = r.headers()['content-type']||'';
+            if ((ct.includes('video/')||ct.includes('mpegurl'))&&looksLikeVideo(u))
+                resolveVideo(u,'response');
         });
 
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-        await page.setExtraHTTPHeaders({ 'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8' });
+        await page.setExtraHTTPHeaders({'Accept-Language':'it-IT,it;q=0.9,en-US;q=0.8'});
+        await page.goto(url,{waitUntil:'domcontentloaded',timeout:30000}).catch(e=>console.log('[v16] goto:',e.message.substring(0,60)));
 
-        console.log('[v15] Navigazione a:', url);
-        const gotoResult = await page.goto(url, {
-            waitUntil: 'domcontentloaded',
-            timeout: 30000,
-        }).catch(e => {
-            console.log('[v15] goto warning:', e.message.substring(0, 80));
-            return null;
-        });
-        console.log('[v15] Pagina caricata, status:', gotoResult?.status?.() || 'N/A');
-
-        if (resolved) return;
-
-        // Poll rapido ogni 500ms per i primi 15 secondi
-        for (let w = 0; w < 30 && !resolved; w++) {
+        for (let w=0;w<30&&!resolved;w++) {
             await sleep(500);
-            const quick = await page.evaluate(() => {
-                try { if (window.MDCore?.wurl) { const u=window.MDCore.wurl; return u.startsWith('//')?'https:'+u:u; } } catch(e){}
-                try { if (window.jwplayer) { const p=window.jwplayer().getPlaylist?.(); if(p?.[0]?.file)return p[0].file; } } catch(e){}
+            const q = await page.evaluate(()=>{
+                try{if(window.MDCore?.wurl){const u=window.MDCore.wurl;return u.startsWith('//')?'https:'+u:u;}}catch(e){}
+                try{if(window.jwplayer){const p=window.jwplayer().getPlaylist?.();if(p?.[0]?.file)return p[0].file;}}catch(e){}
                 const m=document.documentElement.innerHTML.match(/"(https?:\/\/[^"]{15,}\.(?:mp4|m3u8)[^"]{0,100})"/);
                 return m?.[1]||null;
             }).catch(()=>null);
-            if (quick) {
-                console.log(`[v15] Trovato in poll rapido (${w*0.5}s):`, quick.substring(0, 80));
-                if (!resolved) resolveVideo(quick, 'poll');
-                return;
-            }
+            if (q&&!resolved){resolveVideo(q,`poll-${w}`);return;}
         }
-
-        console.log('[v15] Poll rapido completato, resolved:', resolved);
         if (resolved) return;
 
-        // Check DOM
-        const domVideo = await page.evaluate(() => {
-            try {
-                for (const v of document.querySelectorAll('video')) {
-                    if (v.src?.startsWith('http')) return v.src;
-                }
-                if (window.MDCore?.wurl) {
-                    const u = window.MDCore.wurl;
-                    return u.startsWith('//') ? 'https:' + u : u;
-                }
-                if (window.jwplayer) {
-                    const p = window.jwplayer().getPlaylist?.();
-                    if (p?.[0]?.file) return p[0].file;
-                }
-            } catch(e) {}
-            // Cerca nell'HTML
-            const m = document.documentElement.innerHTML.match(/"(https?:\/\/[^"]{15,}\.(?:mp4|m3u8)[^"]{0,100})"/);
-            return m?.[1] || null;
-        }).catch(e => { console.log('[v15] DOM eval error:', e.message); return null; });
-
-        if (domVideo) {
-            console.log('[v15] Trovato nel DOM:', domVideo.substring(0, 100));
-            if (!resolved) resolveVideo(domVideo, 'dom');
-            return;
-        }
-        console.log('[v15] DOM check: niente trovato');
-
-        // Click multipli
-        for (let i = 0; i < 15 && !resolved; i++) {
-            const x = 640 + (Math.random() * 40 - 20);
-            const y = 360 + (Math.random() * 40 - 20);
-            await page.mouse.click(x, y).catch(() => {});
+        for (let i=0;i<15&&!resolved;i++) {
+            await page.mouse.click(640+(Math.random()*40-20),360+(Math.random()*40-20)).catch(()=>{});
             await sleep(800);
-
-            if ((i + 1) % 3 === 0) {
-                const v = await page.evaluate(() => {
-                    try {
-                        for (const v of document.querySelectorAll('video')) {
-                            if (v.src?.startsWith('http')) return v.src;
-                        }
-                        if (window.MDCore?.wurl) { const u=window.MDCore.wurl; return u.startsWith('//')?'https:'+u:u; }
-                    } catch(e) {}
-                    const m = document.documentElement.innerHTML.match(/"(https?:\/\/[^"]{15,}\.(?:mp4|m3u8)[^"]{0,100})"/);
-                    return m?.[1] || null;
-                }).catch(() => null);
-
-                if (v) {
-                    console.log(`[v15] Trovato dopo click ${i+1}:`, v.substring(0, 80));
-                    if (!resolved) resolveVideo(v, `click-${i+1}`);
-                    return;
-                }
-                console.log(`[v15] Click ${i+1}: niente ancora`);
+            if ((i+1)%3===0) {
+                const v=await page.evaluate(()=>{
+                    try{if(window.MDCore?.wurl){const u=window.MDCore.wurl;return u.startsWith('//')?'https:'+u:u;}}catch(e){}
+                    const m=document.documentElement.innerHTML.match(/"(https?:\/\/[^"]{15,}\.(?:mp4|m3u8)[^"]{0,100})"/);
+                    return m?.[1]||null;
+                }).catch(()=>null);
+                if (v&&!resolved){resolveVideo(v,`click-${i+1}`);return;}
+                console.log(`[v16] Click ${i+1}: niente`);
             }
         }
 
-        console.log('[v15] Fine ciclo click, resolved:', resolved);
-
     } catch(e) {
-        console.error('[v15] ERRORE CRITICO:', e.message);
-        console.error('[v15] Stack:', e.stack?.substring(0, 200));
+        console.error('[v16] ERRORE:', e.message);
         clearTimeout(globalTimeout);
         if (!resolved) {
-            resolved = true;
-            if (browser) browser.close().catch(() => {});
-            res.json({ success: false, message: 'Errore: ' + e.message });
+            resolved=true;
+            if(browser)browser.close().catch(()=>{});
+            res.json({success:false,message:'Errore: '+e.message});
         }
     }
 });
 
 // ============================================================
-// PROXY con cookie
+// PROXY: streaming con tutti i cookie giusti
 // ============================================================
 app.get('/proxy', (req, res) => {
     const { url: videoUrl, src: embedSrc } = req.query;
     if (!videoUrl) return res.status(400).send('URL mancante');
 
-    const cached = embedSrc ? cookieCache.get(embedSrc) : null;
-    const cookieStr = cached?.cookieStr || '';
+    const cached = embedSrc ? videoCache.get(embedSrc) : null;
+    const rangeHeader = req.headers['range'];
+
+    // Usa i cookie CDN se disponibili, altrimenti quelli di mixdrop
+    const cookieStr = cached?.cdnCookieStr || cached?.mixdropCookies || '';
     const referer = cached?.referer || 'https://mixdrop.vip/';
 
-    console.log(`[proxy] URL: ${videoUrl.substring(0, 70)}`);
-    console.log(`[proxy] Cookie: ${cookieStr ? cookieStr.substring(0, 80) : 'nessuno'}`);
-    console.log(`[proxy] Range: ${req.headers['range'] || 'nessuno'}`);
+    console.log(`[proxy] ${videoUrl.substring(0,70)}`);
+    console.log(`[proxy] Referer: ${referer}`);
+    console.log(`[proxy] Cookie (${cookieStr.split(';').length}): ${cookieStr.substring(0,100)}`);
+    console.log(`[proxy] Range: ${rangeHeader||'nessuno'}`);
 
     let parsed;
     try { parsed = new URL(videoUrl); } catch(e) { return res.status(400).send('URL non valido'); }
 
-    const protocol = parsed.protocol === 'https:' ? https : http;
-
-    let refererOrigin = 'https://mixdrop.vip';
-    try { refererOrigin = new URL(referer).origin; } catch(e) {}
-
+    const protocol = parsed.protocol==='https:' ? https : http;
     const headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': referer,        // URL completo embed: https://mixdrop.vip/emb/7kpp37vmi31zj4
-        'Origin': refererOrigin,   // Solo origin: https://mixdrop.vip
-        'Accept': '*/*',
-        'Accept-Language': 'it-IT,it;q=0.9',
+        'Accept': 'video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5',
+        'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8',
+        'Accept-Encoding': 'identity',
+        'Referer': referer,
+        'Origin': 'https://mixdrop.vip',
         'Sec-Fetch-Dest': 'video',
         'Sec-Fetch-Mode': 'no-cors',
         'Sec-Fetch-Site': 'cross-site',
+        'Connection': 'keep-alive',
     };
-    if (cookieStr) headers['Cookie'] = cookieStr;
-    if (req.headers['range']) headers['Range'] = req.headers['range'];
+    // Manda i cookie CDN specifici (non quelli di mixdrop.vip)
+    if (cached?.cdnCookieStr) headers['Cookie'] = cached.cdnCookieStr;
+    if (rangeHeader) headers['Range'] = rangeHeader;
 
     const proxyReq = protocol.request({
         hostname: parsed.hostname,
-        port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
-        path: parsed.pathname + parsed.search,
+        port: parsed.port||(parsed.protocol==='https:'?443:80),
+        path: parsed.pathname+parsed.search,
         method: 'GET',
         headers,
         timeout: 30000,
     }, (proxyRes) => {
-        console.log(`[proxy] Risposta: ${proxyRes.statusCode} | CT: ${proxyRes.headers['content-type']} | Size: ${proxyRes.headers['content-length'] || '?'}`);
+        console.log(`[proxy] Risposta: ${proxyRes.statusCode} | CT: ${proxyRes.headers['content-type']} | Size: ${proxyRes.headers['content-length']||'?'}`);
 
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
-        res.setHeader('Accept-Ranges', 'bytes');
-        ['content-type','content-length','content-range','last-modified','etag','cache-control'].forEach(h => {
-            if (proxyRes.headers[h]) res.setHeader(h, proxyRes.headers[h]);
-        });
+        res.setHeader('Access-Control-Allow-Origin','*');
+        res.setHeader('Access-Control-Expose-Headers','Content-Length,Content-Range,Accept-Ranges');
+        res.setHeader('Accept-Ranges','bytes');
+        ['content-type','content-length','content-range','last-modified','etag','cache-control']
+            .forEach(h=>{if(proxyRes.headers[h])res.setHeader(h,proxyRes.headers[h]);});
+
         res.writeHead(proxyRes.statusCode);
-        proxyRes.pipe(res, { end: true });
+        proxyRes.pipe(res,{end:true});
     });
 
-    proxyReq.on('timeout', () => { proxyReq.destroy(); if (!res.headersSent) res.status(504).end(); });
-    proxyReq.on('error', e => { console.error('[proxy] error:', e.message); if (!res.headersSent) res.status(502).end(); });
-    req.on('close', () => proxyReq.destroy());
+    proxyReq.on('timeout',()=>{proxyReq.destroy();if(!res.headersSent)res.status(504).end();});
+    proxyReq.on('error',e=>{console.error('[proxy] error:',e.message);if(!res.headersSent)res.status(502).end();});
+    req.on('close',()=>proxyReq.destroy());
     proxyReq.end();
 });
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v15 porta ${PORT}`));
+function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
+const PORT=process.env.PORT||3000;
+app.listen(PORT,()=>console.log(`Video Extractor v16 porta ${PORT}`));
