@@ -216,9 +216,10 @@ app.get('/proxy', (req, res) => {
         'Sec-Fetch-Site': 'cross-site',
         'Connection': 'keep-alive',
     };
-    // Manda i cookie CDN specifici (non quelli di mixdrop.vip)
-    if (cached?.cdnCookieStr) headers['Cookie'] = cached.cdnCookieStr;
+    // NON mandare cookie mixdrop al CDN - il token s= è sufficiente
+    // I cookie di mixdrop.vip non sono validi per mxcontent.net
     if (rangeHeader) headers['Range'] = rangeHeader;
+    console.log('[proxy] Test SENZA cookie (token s= dovrebbe bastare)');
 
     const proxyReq = protocol.request({
         hostname: parsed.hostname,
