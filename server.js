@@ -13,7 +13,7 @@ app.use((req, res, next) => {
     next();
 });
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v24' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v25' }));
 
 let sharedBrowser = null;
 
@@ -21,21 +21,21 @@ async function getSharedBrowser() {
     if (sharedBrowser) {
         try { await sharedBrowser.pages(); return sharedBrowser; } catch(e) { sharedBrowser = null; }
     }
-    console.log('[browser] Avvio...');
+    console.log('[browser] Avvio (single-process)...');
     sharedBrowser = await puppeteer.launch({
         args: [
             ...chromium.args,
-            '--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage',
-            '--disable-gpu','--no-first-run','--no-zygote','--single-process',
-            '--mute-audio','--disable-blink-features=AutomationControlled',
+            '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+            '--disable-gpu', '--no-first-run', '--no-zygote', '--single-process',
+            '--mute-audio', '--disable-blink-features=AutomationControlled',
         ],
         defaultViewport: { width: 1280, height: 720 },
         executablePath: await chromium.executablePath(),
         headless: chromium.headless,
         ignoreHTTPSErrors: true,
     });
-    sharedBrowser.on('disconnected', () => { sharedBrowser = null; });
-    console.log('[browser] ✅ Avviato (single-process)');
+    sharedBrowser.on('disconnected', () => { console.log('[browser] Disconnesso'); sharedBrowser = null; });
+    console.log('[browser] ✅ Avviato');
     return sharedBrowser;
 }
 
@@ -52,58 +52,86 @@ function looksLikeVideo(url) {
 }
 
 // ============================================================
-// EXTRACT: trova URL video, chiude pagina mixdrop, browser resta
+// EXTRACT: identico a v23 (funzionava), browser single-process
 // ============================================================
 app.post('/extract', async (req, res) => {
     const { url } = req.body;
     if (!url) return res.json({ success: false, message: 'URL mancante' });
-    if (urlCache.has(url)) { const c=urlCache.get(url); console.log('[v24] cache hit'); return res.json({ success: true, video_url: c.videoUrl }); }
+    if (urlCache.has(url)) { const c=urlCache.get(url); console.log('[v25] cache hit'); return res.json({success:true,video_url:c.videoUrl}); }
 
-    console.log('[v24] EXTRACT:', url);
+    console.log('[v25] EXTRACT START:', url);
     let page=null, resolved=false;
-    const timer = setTimeout(() => { if(!resolved){resolved=true; if(page)page.close().catch(()=>{}); res.json({success:false,message:'Timeout'});} }, 70000);
+    const timer = setTimeout(() => {
+        console.log('[v25] TIMEOUT globale');
+        if(!resolved){resolved=true; if(page)page.close().catch(()=>{}); res.json({success:false,message:'Timeout'});}
+    }, 70000);
 
     try {
         const browser = await getSharedBrowser();
         page = await browser.newPage();
-        await page.evaluateOnNewDocument(()=>{ Object.defineProperty(navigator,'webdriver',{get:()=>undefined}); window.chrome={runtime:{}}; });
+        console.log('[v25] Pagina aperta');
+
+        await page.evaluateOnNewDocument(() => {
+            Object.defineProperty(navigator, 'webdriver', {get:()=>undefined});
+            window.chrome = {runtime:{}};
+        });
+
         await page.setRequestInterception(true);
         page.on('request', (r) => {
-            const u=r.url();
+            const u = r.url();
             if(BLOCK_URLS.some(b=>u.includes(b))){ try{r.abort();}catch(e){} return; }
             if(looksLikeVideo(u)){
-                console.log('[v24] Video rilevato:', u.substring(0,80));
+                console.log('[v25] Video trovato (request):', u.substring(0,90));
                 try{r.abort();}catch(e){}
-                if(!resolved){ resolved=true; clearTimeout(timer); urlCache.set(url,{videoUrl:u,ts:Date.now()}); page.close().catch(()=>{}); res.json({success:true,video_url:u}); }
+                if(!resolved){
+                    resolved=true; clearTimeout(timer);
+                    urlCache.set(url,{videoUrl:u,ts:Date.now()});
+                    page.close().catch(()=>{});
+                    console.log('[v25] ✅ VIDEO OK, browser attivo per proxy');
+                    res.json({success:true,video_url:u});
+                }
                 return;
             }
             try{r.continue();}catch(e){}
         });
+
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setExtraHTTPHeaders({'Accept-Language':'it-IT,it;q=0.9'});
-        await page.goto(url,{waitUntil:'domcontentloaded',timeout:30000}).catch(e=>console.log('[v24] goto:',e.message.substring(0,60)));
 
-        for(let w=0;w<30&&!resolved;w++){
+        console.log('[v25] Navigazione:', url);
+        await page.goto(url, {waitUntil:'domcontentloaded',timeout:30000})
+            .catch(e=>console.log('[v25] goto warn:', e.message.substring(0,80)));
+        console.log('[v25] Pagina caricata');
+
+        // Poll DOM per URL video
+        for(let w=0; w<30&&!resolved; w++){
             await sleep(500);
-            const q=await page.evaluate(()=>{
+            const q = await page.evaluate(()=>{
                 try{if(window.MDCore?.wurl){const u=window.MDCore.wurl;return u.startsWith('//')?'https:'+u:u;}}catch(e){}
+                try{if(window.jwplayer){const p=window.jwplayer().getPlaylist?.();if(p?.[0]?.file)return p[0].file;}}catch(e){}
                 const m=document.documentElement.innerHTML.match(/"(https?:\/\/[^"]{15,}\.(?:mp4|m3u8)[^"]{0,100})"/);
                 return m?.[1]||null;
             }).catch(()=>null);
             if(q&&!resolved){resolved=true;clearTimeout(timer);urlCache.set(url,{videoUrl:q,ts:Date.now()});page.close().catch(()=>{});res.json({success:true,video_url:q});return;}
         }
         if(resolved) return;
-        for(let i=0;i<15&&!resolved;i++){
-            await page.mouse.click(640+(Math.random()*40-20),360+(Math.random()*40-20)).catch(()=>{});
+
+        // Click per forzare play
+        for(let i=0; i<15&&!resolved; i++){
+            await page.mouse.click(640+(Math.random()*40-20), 360+(Math.random()*40-20)).catch(()=>{});
             await sleep(800);
             if((i+1)%3===0){
-                const v=await page.evaluate(()=>{try{if(window.MDCore?.wurl){const u=window.MDCore.wurl;return u.startsWith('//')?'https:'+u:u;}}catch(e){}const m=document.documentElement.innerHTML.match(/"(https?:\/\/[^"]{15,}\.(?:mp4|m3u8)[^"]{0,100})"/);return m?.[1]||null;}).catch(()=>null);
+                const v = await page.evaluate(()=>{
+                    try{if(window.MDCore?.wurl){const u=window.MDCore.wurl;return u.startsWith('//')?'https:'+u:u;}}catch(e){}
+                    const m=document.documentElement.innerHTML.match(/"(https?:\/\/[^"]{15,}\.(?:mp4|m3u8)[^"]{0,100})"/);
+                    return m?.[1]||null;
+                }).catch(()=>null);
                 if(v&&!resolved){resolved=true;clearTimeout(timer);urlCache.set(url,{videoUrl:v,ts:Date.now()});page.close().catch(()=>{});res.json({success:true,video_url:v});return;}
-                console.log(`[v24] Click ${i+1}: niente`);
+                console.log(`[v25] Click ${i+1}: niente`);
             }
         }
     } catch(e) {
-        console.error('[v24] ERRORE:', e.message);
+        console.error('[v25] ERRORE:', e.message);
         clearTimeout(timer);
         if(page) page.close().catch(()=>{});
         if(!resolved) res.json({success:false,message:'Errore: '+e.message});
@@ -111,23 +139,23 @@ app.post('/extract', async (req, res) => {
 });
 
 // ============================================================
-// PROXY: nuova pagina VUOTA nello stesso browser (stesso IP)
-// Naviga direttamente al video URL → nessun CORS (è navigazione, non XHR)
-// CDP Fetch intercetta la risposta → stream via IO.read
+// PROXY: nuova pagina nello stesso browser (stesso IP → token valido)
+// CDP Fetch intercetta la risposta → streaming via IO.read
+// Navigazione diretta = nessun CORS (non è XHR ma navigazione)
 // ============================================================
 app.get('/proxy', async (req, res) => {
     const { url: videoUrl, src: embedSrc } = req.query;
     if (!videoUrl) return res.status(400).send('URL mancante');
     const rangeHeader = req.headers['range'];
-    console.log(`[proxy] ${videoUrl.substring(0,70)} | Range:${rangeHeader||'no'}`);
+    console.log(`[proxy] Inizio | Range:${rangeHeader||'no'} | ${videoUrl.substring(0,60)}`);
 
     let videoPage = null;
     try {
         const browser = await getSharedBrowser();
         videoPage = await browser.newPage();
-        const cdp = await videoPage.target().createCDPSession();
+        console.log('[proxy] Pagina aperta');
 
-        // Intercetta la risposta del CDN via CDP (stessa pagina, stesso IP, no CORS!)
+        const cdp = await videoPage.target().createCDPSession();
         await cdp.send('Fetch.enable', {
             patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }]
         });
@@ -136,53 +164,58 @@ app.get('/proxy', async (req, res) => {
             cdp.on('Fetch.requestPaused', async (event) => {
                 const status = event.responseStatusCode;
                 const hdrs = event.responseHeaders || [];
-                const ct = hdrs.find(h=>h.name.toLowerCase()==='content-type')?.value||'video/mp4';
-                const cl = hdrs.find(h=>h.name.toLowerCase()==='content-length')?.value||'';
-                const cr = hdrs.find(h=>h.name.toLowerCase()==='content-range')?.value||'';
-                console.log(`[proxy] CDP: ${status} | ${ct} | ${cl||'?'} bytes | CR:${cr||'no'}`);
+                const ct = hdrs.find(h=>h.name.toLowerCase()==='content-type')?.value || 'video/mp4';
+                const cl = hdrs.find(h=>h.name.toLowerCase()==='content-length')?.value || '';
+                const cr = hdrs.find(h=>h.name.toLowerCase()==='content-range')?.value || '';
+                console.log(`[proxy] CDP risposta: status=${status} CT=${ct} CL=${cl||'?'} CR=${cr||'no'}`);
 
-                if (status && status < 400) {
-                    try {
-                        const {stream} = await cdp.send('Fetch.takeResponseBodyAsStream', {requestId: event.requestId});
+                if(status && status < 400){
+                    try{
+                        const {stream} = await cdp.send('Fetch.takeResponseBodyAsStream', {requestId:event.requestId});
+                        console.log('[proxy] Stream handle OK:', stream);
                         resolve({stream, status, ct, cl, cr});
-                    } catch(e) {
-                        console.error('[proxy] takeResponseBodyAsStream:', e.message);
+                    }catch(e){
+                        console.error('[proxy] takeResponseBodyAsStream err:', e.message);
                         resolve({error: status});
                     }
                 } else {
-                    console.log('[proxy] CDN blocca con status:', status);
+                    console.log('[proxy] CDN blocca status:', status);
                     await cdp.send('Fetch.continueRequest',{requestId:event.requestId}).catch(()=>{});
                     resolve({error: status||403});
                 }
             });
         });
 
-        // Imposta headers prima della navigazione
+        // Imposta headers identici al player originale
         await videoPage.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         const navHeaders = {
-            'Accept': 'video/webm,video/ogg,video/*;q=0.9,*/*;q=0.5',
+            'Accept': '*/*',
             'Accept-Language': 'it-IT,it;q=0.9',
             'Referer': embedSrc || 'https://mixdrop.vip/',
+            'Sec-Fetch-Dest': 'video',
+            'Sec-Fetch-Mode': 'no-cors',
+            'Sec-Fetch-Site': 'cross-site',
         };
-        if (rangeHeader) navHeaders['Range'] = rangeHeader;
+        if(rangeHeader) navHeaders['Range'] = rangeHeader;
         await videoPage.setExtraHTTPHeaders(navHeaders);
+        console.log('[proxy] Headers impostati, navigazione verso il video...');
 
-        // Naviga direttamente al video — navigazione diretta, no CORS!
-        console.log('[proxy] Navigazione diretta al video (stesso IP, no CORS)...');
-        videoPage.goto(videoUrl, {waitUntil:'domcontentloaded', timeout:20000}).catch(e=>console.log('[proxy] goto:',e.message.substring(0,60)));
+        videoPage.goto(videoUrl, {waitUntil:'domcontentloaded', timeout:20000})
+            .catch(e=>console.log('[proxy] goto warn:', e.message.substring(0,60)));
 
         const result = await Promise.race([
             streamReady,
             new Promise((_,reject)=>setTimeout(()=>reject(new Error('Timeout CDP 35s')),35000))
         ]);
 
-        if (result.error) {
+        if(result.error){
+            console.log('[proxy] FALLITO status:', result.error);
             await videoPage.close().catch(()=>{});
             return res.status(result.error).send('CDN error: '+result.error);
         }
 
         const {stream, status, ct, cl, cr} = result;
-        console.log(`[proxy] ✅ Stream: ${status} ${ct} ${cl||'?'}bytes`);
+        console.log(`[proxy] ✅ Streaming: ${status} | ${ct} | ${cl||'?'}b`);
 
         res.setHeader('Access-Control-Allow-Origin','*');
         res.setHeader('Accept-Ranges','bytes');
@@ -191,12 +224,11 @@ app.get('/proxy', async (req, res) => {
         if(cr) res.setHeader('Content-Range', cr);
         res.status(status===206?206:200);
 
-        let total=0;
-        const CHUNK=256*1024;
+        let total=0, CHUNK=256*1024;
         while(true){
-            const chunk=await cdp.send('IO.read',{handle:stream,size:CHUNK});
-            const buf=chunk.base64Encoded?Buffer.from(chunk.data,'base64'):Buffer.from(chunk.data,'binary');
-            if(buf.length>0){res.write(buf);total+=buf.length;}
+            const chunk = await cdp.send('IO.read',{handle:stream,size:CHUNK});
+            const buf = chunk.base64Encoded ? Buffer.from(chunk.data,'base64') : Buffer.from(chunk.data,'binary');
+            if(buf.length>0){ res.write(buf); total+=buf.length; }
             if(chunk.eof) break;
             if(total%(5*1024*1024)<CHUNK) console.log(`[proxy] ${Math.round(total/1024/1024)}MB...`);
         }
@@ -213,5 +245,5 @@ app.get('/proxy', async (req, res) => {
 });
 
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
-const PORT=process.env.PORT||3000;
-app.listen(PORT,()=>console.log(`Video Extractor v24 porta ${PORT}`));
+const PORT = process.env.PORT||3000;
+app.listen(PORT, ()=>console.log(`Video Extractor v25 porta ${PORT}`));
