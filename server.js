@@ -101,9 +101,10 @@ app.post('/extract', async (req, res) => {
             if (interceptorDone) { try { request.continue(); } catch(e) {} return; }
             const u = request.url();
             if (BLOCK_URLS.some(b => u.includes(b))) { try{request.abort();}catch(e){} return; }
-            // Blocca risorse pesanti non necessarie per trovare il video URL
+            // Blocca solo immagini e font (sicuri da bloccare)
+            // MAI bloccare 'media','xhr','fetch','script': potrebbero contenere il video URL
             const rtype = request.resourceType();
-            if (['image','stylesheet','font','media','other'].includes(rtype)) {
+            if (['image','font'].includes(rtype)) {
                 try { request.abort(); } catch(e) {}
                 return;
             }
