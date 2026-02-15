@@ -129,9 +129,6 @@ app.post('/extract', async (req, res) => {
                     page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 })
                         .then(async () => {
                             try {
-                                const cdp = await page.target().createCDPSession();
-                                // Forza GC Chrome: libera memoria di mixdrop (50+ script/risorse)
-                                // Tipicamente libera 100-150MB dopo about:blank
                                 // Sessione TEMPORANEA per pulizia memoria
                                 // Separata da quella Fetch per evitare interferenze
                                 const cleanCdp = await page.target().createCDPSession();
@@ -192,7 +189,6 @@ app.post('/extract', async (req, res) => {
                 resolved = true; clearTimeout(globalTimeout);
                 try {
                     await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
-                    const cdp = await page.target().createCDPSession();
                     const cleanCdp2 = await page.target().createCDPSession();
                     await cleanCdp2.send('Network.clearBrowserCache').catch(()=>{});
                     await cleanCdp2.send('Network.clearBrowserCookies').catch(()=>{});
@@ -226,7 +222,6 @@ app.post('/extract', async (req, res) => {
                     resolved = true; clearTimeout(globalTimeout);
                     try {
                         await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
-                        const cdp = await page.target().createCDPSession();
                         const cleanCdp3 = await page.target().createCDPSession();
                     await cleanCdp3.send('Network.clearBrowserCache').catch(()=>{});
                     await cleanCdp3.send('Network.clearBrowserCookies').catch(()=>{});
