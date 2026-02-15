@@ -13,24 +13,51 @@ app.use((req, res, next) => {
     next();
 });
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v40' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v41' }));
 
-// Una sola sessione: { embedUrl, videoUrl, browser, page, ts }
-// page = la stessa pagina che ha caricato mixdrop, navigata a about:blank
-// Stessa pagina = stessa sessione TLS con mxcontent.net → CDN accetta
-let currentSession = null;
+let currentSession = null; // { embedUrl, videoUrl, browser, page, ts }
+let proxyBusy = false;     // serializza le richieste proxy sulla stessa pagina
+const proxyQueue = [];     // coda richieste proxy
 
 function closeSession() {
     if (currentSession) {
-        console.log('[v40] Chiudo sessione precedente');
+        console.log('[v41] Chiudo sessione');
         if (currentSession.browser) currentSession.browser.close().catch(() => {});
         currentSession = null;
+        proxyBusy = false;
+        proxyQueue.length = 0;
     }
 }
 
 setInterval(() => {
     if (currentSession && Date.now() - currentSession.ts > 15 * 60 * 1000) closeSession();
 }, 60000);
+
+// ============================================================
+// CODA PROXY: una sola page.evaluate() alla volta
+// Il player fa richieste concorrenti → le serializziamo
+// ============================================================
+function enqueueProxy(fn) {
+    return new Promise((resolve, reject) => {
+        proxyQueue.push({ fn, resolve, reject });
+        drainQueue();
+    });
+}
+
+function drainQueue() {
+    if (proxyBusy || proxyQueue.length === 0) return;
+    const { fn, resolve, reject } = proxyQueue.shift();
+    proxyBusy = true;
+    fn().then(result => {
+        proxyBusy = false;
+        resolve(result);
+        drainQueue(); // prossimo in coda
+    }).catch(err => {
+        proxyBusy = false;
+        reject(err);
+        drainQueue();
+    });
+}
 
 const VIDEO_EXTS = ['.mp4', '.m3u8', '.webm', '.ts'];
 const BLOCK_URLS = ['google-analytics','googletagmanager','doubleclick',
@@ -58,10 +85,7 @@ async function launchBrowser() {
 }
 
 // ============================================================
-// EXTRACT: trova URL, poi naviga STESSA PAGINA a about:blank
-// - stessa pagina = stessa sessione TLS → CDN accetta fetch()
-// - await about:blank: proxy non arriva troppo presto
-// - un solo browser in RAM: chiude il precedente prima
+// EXTRACT
 // ============================================================
 app.post('/extract', async (req, res) => {
     const { url } = req.body;
@@ -69,18 +93,17 @@ app.post('/extract', async (req, res) => {
 
     if (currentSession && currentSession.embedUrl === url) {
         currentSession.ts = Date.now();
-        console.log('[v40] Cache hit:', currentSession.videoUrl.substring(0, 60));
+        console.log('[v41] Cache hit:', currentSession.videoUrl.substring(0, 60));
         return res.json({ success: true, video_url: currentSession.videoUrl });
     }
 
-    // Chiudi SEMPRE il browser precedente (evita due browser in RAM → OOM)
-    closeSession();
+    closeSession(); // max un browser in RAM
 
-    console.log('[v40] ESTRAZIONE:', url);
+    console.log('[v41] ESTRAZIONE:', url);
     let browser = null, page = null, resolved = false;
 
     const globalTimeout = setTimeout(() => {
-        console.log('[v40] TIMEOUT');
+        console.log('[v41] TIMEOUT');
         if (!resolved) {
             resolved = true;
             if (page) page.close().catch(() => {});
@@ -104,23 +127,19 @@ app.post('/extract', async (req, res) => {
             const u = request.url();
             if (BLOCK_URLS.some(b => u.includes(b))) { try{request.abort();}catch(e){} return; }
             if (looksLikeVideo(u)) {
-                console.log('[v40] Video:', u.substring(0, 80));
+                console.log('[v41] Video:', u.substring(0, 80));
                 interceptorDone = true;
                 try { request.abort(); } catch(e) {}
                 if (!resolved) {
                     resolved = true; clearTimeout(globalTimeout);
-                    // Naviga STESSA pagina a about:blank (non aprire nuova pagina!)
-                    // about:blank: nessuna CSP, --disable-web-security: nessun CORS
-                    // Stessa sessione TLS con mxcontent.net → CDN accetta le richieste
                     page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 })
                         .then(() => {
-                            console.log('[v40] ✅ about:blank pronto, sessione TLS mantenuta');
+                            console.log('[v41] ✅ about:blank pronto');
                             currentSession = { embedUrl: url, videoUrl: u, browser, page, ts: Date.now() };
                             res.json({ success: true, video_url: u });
                         })
                         .catch(() => {
                             setTimeout(() => {
-                                console.log('[v40] ✅ about:blank (fallback delay)');
                                 currentSession = { embedUrl: url, videoUrl: u, browser, page, ts: Date.now() };
                                 res.json({ success: true, video_url: u });
                             }, 800);
@@ -134,7 +153,7 @@ app.post('/extract', async (req, res) => {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'it-IT,it;q=0.9' });
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
-            .catch(e => console.log('[v40] goto:', e.message.substring(0, 60)));
+            .catch(e => console.log('[v41] goto:', e.message.substring(0, 60)));
 
         for (let w = 0; w < 30 && !resolved; w++) {
             await sleep(500);
@@ -169,11 +188,11 @@ app.post('/extract', async (req, res) => {
                     res.json({ success: true, video_url: v });
                     return;
                 }
-                console.log(`[v40] Click ${i+1}: niente`);
+                console.log(`[v41] Click ${i+1}: niente`);
             }
         }
     } catch(e) {
-        console.error('[v40] ERRORE:', e.message);
+        console.error('[v41] ERRORE:', e.message);
         clearTimeout(globalTimeout);
         if (page) page.close().catch(() => {});
         if (!resolved) {
@@ -185,10 +204,9 @@ app.post('/extract', async (req, res) => {
 });
 
 // ============================================================
-// PROXY: fetch() dalla STESSA pagina (about:blank) dell'extract
-// Stessa pagina = stessa sessione TLS = CDN accetta → 206 ✅
-// Chunk 16KB: btoa in ~50ms, nessun timeout ✅
-// NON navigare la pagina tra un fetch e l'altro ✅
+// PROXY: fetch serializzati tramite coda
+// Una sola page.evaluate() alla volta → nessun crash, nessun OOM
+// HTTP 206 Range requests = streaming nativo del browser ✅
 // ============================================================
 app.get('/proxy', async (req, res) => {
     const { url: videoUrl, src: embedSrc } = req.query;
@@ -196,11 +214,11 @@ app.get('/proxy', async (req, res) => {
 
     const rangeHeader = req.headers['range'];
     const ok = currentSession && currentSession.page;
-    console.log(`[proxy] Range:${rangeHeader||'no'} | Session:${ok?'sì':'NO'} | ${videoUrl.substring(0,55)}`);
+    console.log(`[proxy] Range:${rangeHeader||'no'} | Session:${ok?'sì':'NO'} | ${videoUrl.substring(0,50)}`);
 
     if (!ok) return res.status(503).send('Sessione scaduta, ricarica');
 
-    const CHUNK = 16 * 1024; // 16KB: btoa ~50ms, sicuro
+    const CHUNK = 16 * 1024; // 16KB: btoa in ~50ms
     let start = 0, end = CHUNK - 1;
     if (rangeHeader) {
         const m = rangeHeader.match(/bytes=(\d+)-(\d*)/);
@@ -210,32 +228,34 @@ app.get('/proxy', async (req, res) => {
         }
     }
     const rangeStr = `bytes=${start}-${end}`;
-    console.log(`[proxy] fetch: ${rangeStr}`);
 
     try {
-        const { page } = currentSession;
-
-        const result = await Promise.race([
-            page.evaluate(async (opts) => {
-                try {
-                    const r = await fetch(opts.url, {
-                        headers: { 'Range': opts.range, 'Accept': '*/*', 'Referer': opts.referer }
-                    });
-                    const status = r.status;
-                    if (status >= 400) return { error: true, status, msg: `HTTP ${status}` };
-                    const ct = r.headers.get('content-type') || 'video/mp4';
-                    const cr = r.headers.get('content-range') || '';
-                    const ab = await r.arrayBuffer();
-                    const bytes = new Uint8Array(ab);
-                    let bin = '';
-                    for (let i = 0; i < bytes.length; i += 4096) {
-                        bin += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i+4096, bytes.length)));
-                    }
-                    return { error: false, status, ct, cr, b64: btoa(bin), len: bytes.length };
-                } catch(e) { return { error: true, msg: e.message }; }
-            }, { url: videoUrl, range: rangeStr, referer: embedSrc || 'https://mixdrop.vip/' }),
-            new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout 20s')), 20000))
-        ]);
+        // Metti in coda: una sola evaluate alla volta
+        const result = await enqueueProxy(async () => {
+            if (!currentSession || !currentSession.page) throw new Error('Sessione persa');
+            console.log(`[proxy] fetch: ${rangeStr}`);
+            return Promise.race([
+                currentSession.page.evaluate(async (opts) => {
+                    try {
+                        const r = await fetch(opts.url, {
+                            headers: { 'Range': opts.range, 'Accept': '*/*', 'Referer': opts.referer }
+                        });
+                        const status = r.status;
+                        if (status >= 400) return { error: true, status, msg: `HTTP ${status}` };
+                        const ct = r.headers.get('content-type') || 'video/mp4';
+                        const cr = r.headers.get('content-range') || '';
+                        const ab = await r.arrayBuffer();
+                        const bytes = new Uint8Array(ab);
+                        let bin = '';
+                        for (let i = 0; i < bytes.length; i += 4096) {
+                            bin += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i+4096, bytes.length)));
+                        }
+                        return { error: false, status, ct, cr, b64: btoa(bin), len: bytes.length };
+                    } catch(e) { return { error: true, msg: e.message }; }
+                }, { url: videoUrl, range: rangeStr, referer: embedSrc || 'https://mixdrop.vip/' }),
+                new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout 20s')), 20000))
+            ]);
+        });
 
         if (result.error) {
             console.error('[proxy] err:', result.msg || result.status);
@@ -260,4 +280,4 @@ app.get('/proxy', async (req, res) => {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v40 porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v41 porta ${PORT}`));
