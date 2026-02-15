@@ -13,7 +13,7 @@ app.use((req, res, next) => {
     next();
 });
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v46' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v46b' }));
 
 let currentSession = null; // { embedUrl, videoUrl, browser, page, ts }
 
@@ -200,7 +200,7 @@ app.get('/proxy', async (req, res) => {
     console.log(`[proxy] Range:${rangeHeader||'no'} | Session:${ok?'sì':'NO'} | ${videoUrl.substring(0,50)}`);
     if (!ok) return res.status(503).send('Sessione scaduta, ricarica');
 
-    const CHUNK = 64 * 1024;
+    const CHUNK = 16 * 1024; // 16KB: btoa <5ms, zero GC pressure
     let start = 0, end = CHUNK - 1;
     if (rangeHeader) {
         const m = rangeHeader.match(/bytes=(\d+)-(\d*)/);
@@ -234,7 +234,7 @@ app.get('/proxy', async (req, res) => {
                         return { error: false, status, ct, cr, b64: btoa(bin), len: bytes.length };
                     } catch(e) { return { error: true, msg: e.message }; }
                 }, { url: videoUrl, range: rangeStr, referer: embedSrc || 'https://mixdrop.vip/' }),
-                new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout 20s')), 20000))
+                new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout 30s')), 30000))
             ]);
         });
 
@@ -261,4 +261,4 @@ app.get('/proxy', async (req, res) => {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v46 porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v46b porta ${PORT}`));
