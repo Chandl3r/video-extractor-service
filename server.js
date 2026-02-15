@@ -84,7 +84,7 @@ app.post('/extract', async (req, res) => {
             if (browser) browser.close().catch(() => {});
             res.json({ success: false, message: 'Timeout' });
         }
-    }, 70000);
+    }, 90000);
 
     try {
         browser = await launchBrowser();
@@ -104,7 +104,7 @@ app.post('/extract', async (req, res) => {
             // Blocca solo immagini e font (sicuri da bloccare)
             // MAI bloccare 'media','xhr','fetch','script': potrebbero contenere il video URL
             const rtype = request.resourceType();
-            if (['image','font'].includes(rtype)) {
+            if (['image','font','stylesheet'].includes(rtype)) {
                 try { request.abort(); } catch(e) {}
                 return;
             }
@@ -121,7 +121,7 @@ app.post('/extract', async (req, res) => {
 
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'it-IT,it;q=0.9' });
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 })
             .catch(e => console.log('[v49] goto:', e.message.substring(0, 60)));
 
         // Poll: aspetta che interceptor trovi il video O che DOM lo esponga
