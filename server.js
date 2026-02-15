@@ -13,7 +13,7 @@ app.use((req, res, next) => {
     next();
 });
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v45' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v45b' }));
 
 // Una sola sessione: { embedUrl, videoUrl, browser, page, ts }
 let currentSession = null;
@@ -262,8 +262,13 @@ app.get('/proxy', async (req, res) => {
                         const cr = r.headers.get('content-range') || '';
                         const ab = await r.arrayBuffer();
                         // TextDecoder: zero loop, eseguito in C++ nativo, minimo garbage V8
-                        const b64 = btoa(new TextDecoder('latin1').decode(ab));
-                        return { error: false, status, ct, cr, b64, len: ab.byteLength };
+                        // String.fromCharCode in batch: metodo sicuro per dati binari
+                        const bytes = new Uint8Array(ab);
+                        let bin = '';
+                        for (let i = 0; i < bytes.length; i += 4096) {
+                            bin += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 4096, bytes.length)));
+                        }
+                        return { error: false, status, ct, cr, b64: btoa(bin), len: bytes.length };
                     } catch(e) { return { error: true, msg: e.message }; }
                 }, { url: videoUrl, range: rangeStr, referer: embedSrc || 'https://mixdrop.vip/' }),
                 new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout 20s')), 20000))
@@ -293,4 +298,4 @@ app.get('/proxy', async (req, res) => {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v45 porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v45b porta ${PORT}`));
