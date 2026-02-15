@@ -13,14 +13,14 @@ app.use((req, res, next) => {
     next();
 });
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v51-diag' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v54' }));
 
 let session = null; // { embedUrl, videoUrl, browser, page, cdp, ts }
 let proxyChain = Promise.resolve();
 
 function closeSession() {
     if (session) {
-        console.log('[v53] Chiudo sessione');
+        console.log('[v54] Chiudo sessione');
         if (session.browser) session.browser.close().catch(() => {});
         session = null;
         proxyChain = Promise.resolve();
@@ -73,16 +73,16 @@ app.post('/extract', async (req, res) => {
 
     if (session && session.embedUrl === url) {
         session.ts = Date.now();
-        console.log('[v53] Cache hit:', session.videoUrl.substring(0, 60));
+        console.log('[v54] Cache hit:', session.videoUrl.substring(0, 60));
         return res.json({ success: true, video_url: session.videoUrl });
     }
 
     closeSession();
-    console.log('[v53] ESTRAZIONE:', url);
+    console.log('[v54] ESTRAZIONE:', url);
     let browser = null, page = null, resolved = false;
 
     const globalTimeout = setTimeout(() => {
-        console.log('[v53] TIMEOUT');
+        console.log('[v54] TIMEOUT');
         if (!resolved) {
             resolved = true;
             if (page) page.close().catch(() => {});
@@ -104,49 +104,39 @@ app.post('/extract', async (req, res) => {
         page.on('request', (request) => {
             if (interceptorDone) { try { request.continue(); } catch(e) {} return; }
             const u = request.url();
-            const rt = request.resourceType();
-            // Log ogni richiesta non-image per diagnostica
-            if (!['image','stylesheet','font','ping'].includes(rt)) {
-                console.log(`[v53] REQ ${rt}: ${u.substring(0,80)}`);
-            }
-            if (BLOCK_URLS.some(b => u.includes(b))) { try { request.abort(); } catch(e) {} return; }
-            // Blocca immagini e font
             const rtype = request.resourceType();
-            if (['image', 'font', 'stylesheet'].includes(rtype)) { try { request.abort(); } catch(e) {} return; }
-            // Blocca script/xhr/fetch di terze parti per risparmiare RAM
-            // Lascia passare solo: mixdrop.vip, m1xdrop.*, jquery, cloudflare
-            const trusted = u.includes('mixdrop.vip') || u.includes('m1xdrop.') || 
-                            u.includes('code.jquery.com') || u.includes('cloudflare') ||
-                            u.includes('mxcontent.net');
-            if (!trusted && ['script','xhr','fetch','other'].includes(rtype)) {
+
+            // Blocca risorse decorative (nessun impatto sul player)
+            if (['image', 'font', 'stylesheet', 'media'].includes(rtype) && !looksLikeVideo(u)) {
                 try { request.abort(); } catch(e) {} return;
             }
+            // Blocca solo domini AD noti (non toccare gstatic/google needed dal player)
+            if (BLOCK_URLS.some(b => u.includes(b))) { try { request.abort(); } catch(e) {} return; }
+
+            // Video trovato!
             if (looksLikeVideo(u)) {
-                console.log('[v53] Video:', u.substring(0, 80));
+                console.log('[v54] Video:', u.substring(0, 80));
                 interceptorDone = true;
                 try { request.abort(); } catch(e) {}
                 if (!resolved) {
                     resolved = true; clearTimeout(globalTimeout);
-                    // Identico a v47: goto async nel .then(), nessun deadlock
                     page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 })
                         .then(async () => {
                             try {
                                 const cdp = await page.target().createCDPSession();
-                                // Fix v47: pattern specifico invece di '*'
                                 await cdp.send('Fetch.enable', {
                                     patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }]
                                 });
-                                console.log('[v53] ✅ CDP pronto');
+                                console.log('[v54] ✅ CDP pronto');
                                 session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now() };
                                 res.json({ success: true, video_url: u });
                             } catch(e) {
-                                console.error('[v53] CDP err:', e.message);
+                                console.error('[v54] CDP err:', e.message);
                                 if (browser) browser.close().catch(() => {});
                                 res.json({ success: false, message: 'CDP err' });
                             }
                         })
                         .catch(() => {
-                            // about:blank fallita: retry dopo 1s
                             setTimeout(async () => {
                                 try {
                                     const cdp = await page.target().createCDPSession();
@@ -170,7 +160,7 @@ app.post('/extract', async (req, res) => {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'it-IT,it;q=0.9' });
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 })
-            .catch(e => console.log('[v53] goto:', e.message.substring(0, 60)));
+            .catch(e => console.log('[v54] goto:', e.message.substring(0, 60)));
 
         for (let w = 0; w < 10 && !resolved; w++) {
             await sleep(500);
@@ -223,11 +213,11 @@ app.post('/extract', async (req, res) => {
                     }
                     return;
                 }
-                console.log(`[v53] Click ${i+1}: niente`);
+                console.log(`[v54] Click ${i+1}: niente`);
             }
         }
     } catch(e) {
-        console.error('[v53] ERRORE:', e.message);
+        console.error('[v54] ERRORE:', e.message);
         clearTimeout(globalTimeout);
         if (page) page.close().catch(() => {});
         if (!resolved) {
@@ -354,4 +344,4 @@ app.get('/proxy', async (req, res) => {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v51 porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v54 porta ${PORT}`));
