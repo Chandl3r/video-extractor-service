@@ -53,8 +53,8 @@ async function launchBrowser() {
                '--no-sandbox', '--disable-setuid-sandbox',
                '--disable-dev-shm-usage', '--disable-gpu',
                '--no-first-run', '--no-zygote', '--single-process',
-               '--mute-audio', '--disable-blink-features=AutomationControlled'],
-               // NO --disable-web-security: non serve con CDP, e destabilizza Chrome
+               '--mute-audio', '--disable-blink-features=AutomationControlled',
+               '--disable-web-security', '--allow-running-insecure-content'],
         defaultViewport: { width: 1280, height: 720 },
         executablePath: await chromium.executablePath(),
         headless: chromium.headless,
