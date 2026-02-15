@@ -13,62 +13,34 @@ app.use((req, res, next) => {
     next();
 });
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v45b' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v46' }));
 
-// Una sola sessione: { embedUrl, videoUrl, browser, page, ts }
-let currentSession = null;
+let currentSession = null; // { embedUrl, videoUrl, browser, page, ts }
 
-// Stato pagina: 'ready' oppure 'reloading'
-// Dopo ogni fetch ricarichiamo about:blank per svuotare il V8 heap
-// Le connessioni TCP/TLS a mxcontent.net restano vive (network process Chrome)
-let pageState = 'ready';
-const proxyQueue = [];
+// Promise-chain mutex: UNICO metodo race-condition-free in Node.js
+// Ogni chiamata aspetta la precedente prima di partire, SENZA exception se overlap
+let proxyChain = Promise.resolve();
+
+function withProxyLock(fn) {
+    // Aggancia questa richiesta in fondo alla catena
+    const result = proxyChain.then(() => fn());
+    // La catena avanza SOLO quando fn() completa (o fallisce)
+    proxyChain = result.catch(() => {});
+    return result;
+}
 
 function closeSession() {
     if (currentSession) {
-        console.log('[v45] Chiudo sessione');
+        console.log('[v46] Chiudo sessione');
         if (currentSession.browser) currentSession.browser.close().catch(() => {});
         currentSession = null;
-        pageState = 'ready';
-        proxyQueue.length = 0;
+        proxyChain = Promise.resolve(); // reset catena
     }
 }
 
 setInterval(() => {
     if (currentSession && Date.now() - currentSession.ts > 15 * 60 * 1000) closeSession();
 }, 60000);
-
-// Coda proxy: serializza le richieste E aspetta reload pagina
-function enqueueProxy(fn) {
-    return new Promise((resolve, reject) => {
-        proxyQueue.push({ fn, resolve, reject });
-        drainQueue();
-    });
-}
-function drainQueue() {
-    if (pageState !== 'ready' || proxyQueue.length === 0) return;
-    const { fn, resolve, reject } = proxyQueue.shift();
-    pageState = 'fetching';
-    fn()
-        .then(result => {
-            // Dopo ogni fetch: ricarica about:blank per svuotare V8 heap
-            // Le connessioni TCP/TLS rimangono vive nel network process
-            if (currentSession && currentSession.page) {
-                pageState = 'reloading';
-                currentSession.page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 })
-                    .then(() => { pageState = 'ready'; drainQueue(); })
-                    .catch(() => { pageState = 'ready'; drainQueue(); });
-            } else {
-                pageState = 'ready';
-            }
-            resolve(result);
-        })
-        .catch(err => {
-            pageState = 'ready';
-            reject(err);
-            drainQueue();
-        });
-}
 
 const VIDEO_EXTS = ['.mp4', '.m3u8', '.webm', '.ts'];
 const BLOCK_URLS = ['google-analytics','googletagmanager','doubleclick',
@@ -104,16 +76,16 @@ app.post('/extract', async (req, res) => {
 
     if (currentSession && currentSession.embedUrl === url) {
         currentSession.ts = Date.now();
-        console.log('[v45] Cache hit:', currentSession.videoUrl.substring(0, 60));
+        console.log('[v46] Cache hit:', currentSession.videoUrl.substring(0, 60));
         return res.json({ success: true, video_url: currentSession.videoUrl });
     }
 
     closeSession();
-    console.log('[v45] ESTRAZIONE:', url);
+    console.log('[v46] ESTRAZIONE:', url);
     let browser = null, page = null, resolved = false;
 
     const globalTimeout = setTimeout(() => {
-        console.log('[v45] TIMEOUT');
+        console.log('[v46] TIMEOUT');
         if (!resolved) {
             resolved = true;
             if (page) page.close().catch(() => {});
@@ -137,22 +109,19 @@ app.post('/extract', async (req, res) => {
             const u = request.url();
             if (BLOCK_URLS.some(b => u.includes(b))) { try{request.abort();}catch(e){} return; }
             if (looksLikeVideo(u)) {
-                console.log('[v45] Video:', u.substring(0, 80));
+                console.log('[v46] Video:', u.substring(0, 80));
                 interceptorDone = true;
                 try { request.abort(); } catch(e) {}
                 if (!resolved) {
                     resolved = true; clearTimeout(globalTimeout);
-                    // Aspetta about:blank: pagina pronta per fetch, V8 heap pulito
                     page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 })
                         .then(() => {
-                            console.log('[v45] ✅ about:blank pronto');
-                            pageState = 'ready';
+                            console.log('[v46] ✅ about:blank pronto');
                             currentSession = { embedUrl: url, videoUrl: u, browser, page, ts: Date.now() };
                             res.json({ success: true, video_url: u });
                         })
                         .catch(() => {
                             setTimeout(() => {
-                                pageState = 'ready';
                                 currentSession = { embedUrl: url, videoUrl: u, browser, page, ts: Date.now() };
                                 res.json({ success: true, video_url: u });
                             }, 800);
@@ -166,7 +135,7 @@ app.post('/extract', async (req, res) => {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'it-IT,it;q=0.9' });
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
-            .catch(e => console.log('[v45] goto:', e.message.substring(0, 60)));
+            .catch(e => console.log('[v46] goto:', e.message.substring(0, 60)));
 
         for (let w = 0; w < 30 && !resolved; w++) {
             await sleep(500);
@@ -178,7 +147,6 @@ app.post('/extract', async (req, res) => {
             if (q && !resolved) {
                 resolved = true; clearTimeout(globalTimeout);
                 await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
-                pageState = 'ready';
                 currentSession = { embedUrl: url, videoUrl: q, browser, page, ts: Date.now() };
                 res.json({ success: true, video_url: q });
                 return;
@@ -198,16 +166,15 @@ app.post('/extract', async (req, res) => {
                 if (v && !resolved) {
                     resolved = true; clearTimeout(globalTimeout);
                     await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
-                    pageState = 'ready';
                     currentSession = { embedUrl: url, videoUrl: v, browser, page, ts: Date.now() };
                     res.json({ success: true, video_url: v });
                     return;
                 }
-                console.log(`[v45] Click ${i+1}: niente`);
+                console.log(`[v46] Click ${i+1}: niente`);
             }
         }
     } catch(e) {
-        console.error('[v45] ERRORE:', e.message);
+        console.error('[v46] ERRORE:', e.message);
         clearTimeout(globalTimeout);
         if (page) page.close().catch(() => {});
         if (!resolved) {
@@ -219,12 +186,10 @@ app.post('/extract', async (req, res) => {
 });
 
 // ============================================================
-// PROXY
-// - Coda serializzata: una fetch alla volta
-// - TextDecoder('latin1') per btoa: zero loop, zero garbage ✅
-// - Dopo ogni fetch: ricarica about:blank (svuota V8 heap) ✅
-//   Le connessioni TCP/TLS a mxcontent.net restano vive ✅
-// - Chunk 64KB: buon bilanciamento velocità/heap ✅
+// PROXY: Promise-chain mutex
+// - Una sola page.evaluate() alla volta, GARANTITO ✅
+// - Nessun about:blank reload → nessun context destroyed ✅
+// - Chunk 64KB con fromCharCode batch ✅
 // ============================================================
 app.get('/proxy', async (req, res) => {
     const { url: videoUrl, src: embedSrc } = req.query;
@@ -235,7 +200,7 @@ app.get('/proxy', async (req, res) => {
     console.log(`[proxy] Range:${rangeHeader||'no'} | Session:${ok?'sì':'NO'} | ${videoUrl.substring(0,50)}`);
     if (!ok) return res.status(503).send('Sessione scaduta, ricarica');
 
-    const CHUNK = 64 * 1024; // 64KB: TextDecoder btoa ~2ms, ricarica ogni chunk
+    const CHUNK = 64 * 1024;
     let start = 0, end = CHUNK - 1;
     if (rangeHeader) {
         const m = rangeHeader.match(/bytes=(\d+)-(\d*)/);
@@ -247,7 +212,7 @@ app.get('/proxy', async (req, res) => {
     const rangeStr = `bytes=${start}-${end}`;
 
     try {
-        const result = await enqueueProxy(async () => {
+        const result = await withProxyLock(async () => {
             if (!currentSession || !currentSession.page) throw new Error('Sessione persa');
             console.log(`[proxy] fetch: ${rangeStr}`);
             return Promise.race([
@@ -261,12 +226,10 @@ app.get('/proxy', async (req, res) => {
                         const ct = r.headers.get('content-type') || 'video/mp4';
                         const cr = r.headers.get('content-range') || '';
                         const ab = await r.arrayBuffer();
-                        // TextDecoder: zero loop, eseguito in C++ nativo, minimo garbage V8
-                        // String.fromCharCode in batch: metodo sicuro per dati binari
                         const bytes = new Uint8Array(ab);
                         let bin = '';
                         for (let i = 0; i < bytes.length; i += 4096) {
-                            bin += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 4096, bytes.length)));
+                            bin += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i+4096, bytes.length)));
                         }
                         return { error: false, status, ct, cr, b64: btoa(bin), len: bytes.length };
                     } catch(e) { return { error: true, msg: e.message }; }
@@ -298,4 +261,4 @@ app.get('/proxy', async (req, res) => {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v45b porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v46 porta ${PORT}`));
