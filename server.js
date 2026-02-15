@@ -13,7 +13,7 @@ app.use((req, res, next) => {
     next();
 });
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v47' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v47b' }));
 
 // Sessione: { embedUrl, videoUrl, browser, page, cdp, ts }
 let session = null;
@@ -120,7 +120,7 @@ app.post('/extract', async (req, res) => {
                                 const cdp = await page.target().createCDPSession();
                                 // Intercetta RESPONSE delle richieste video (non request)
                                 await cdp.send('Fetch.enable', {
-                                    patterns: [{ urlPattern: '*', requestStage: 'Response' }]
+                                    patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }]
                                 });
                                 console.log('[v47] ✅ CDP pronto su about:blank');
                                 session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now() };
@@ -157,7 +157,7 @@ app.post('/extract', async (req, res) => {
                 await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
                 try {
                     const cdp = await page.target().createCDPSession();
-                    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Response' }] });
+                    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }] });
                     session = { embedUrl: url, videoUrl: q, browser, page, cdp, ts: Date.now() };
                 } catch(e) {
                     session = { embedUrl: url, videoUrl: q, browser, page, cdp: null, ts: Date.now() };
@@ -182,7 +182,7 @@ app.post('/extract', async (req, res) => {
                     await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
                     try {
                         const cdp = await page.target().createCDPSession();
-                        await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Response' }] });
+                        await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }] });
                         session = { embedUrl: url, videoUrl: v, browser, page, cdp, ts: Date.now() };
                     } catch(e) {
                         session = { embedUrl: url, videoUrl: v, browser, page, cdp: null, ts: Date.now() };
@@ -359,4 +359,4 @@ async function proxyBtoa(req, res, videoUrl, rangeHeader, embedSrc) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v47 porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v47b porta ${PORT}`));
