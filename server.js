@@ -13,7 +13,7 @@ app.use((req, res, next) => {
     next();
 });
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v51' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v51-diag' }));
 
 let session = null; // { embedUrl, videoUrl, browser, page, cdp, ts }
 let proxyChain = Promise.resolve();
@@ -84,7 +84,7 @@ app.post('/extract', async (req, res) => {
             if (browser) browser.close().catch(() => {});
             res.json({ success: false, message: 'Timeout' });
         }
-    }, 70000);
+    }, 120000);
 
     try {
         browser = await launchBrowser();
@@ -99,6 +99,11 @@ app.post('/extract', async (req, res) => {
         page.on('request', (request) => {
             if (interceptorDone) { try { request.continue(); } catch(e) {} return; }
             const u = request.url();
+            const rt = request.resourceType();
+            // Log ogni richiesta non-image per diagnostica
+            if (!['image','stylesheet','font','ping'].includes(rt)) {
+                console.log(`[v51] REQ ${rt}: ${u.substring(0,80)}`);
+            }
             if (BLOCK_URLS.some(b => u.includes(b))) { try { request.abort(); } catch(e) {} return; }
             if (looksLikeVideo(u)) {
                 console.log('[v51] Video:', u.substring(0, 80));
@@ -148,10 +153,10 @@ app.post('/extract', async (req, res) => {
 
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'it-IT,it;q=0.9' });
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 })
             .catch(e => console.log('[v51] goto:', e.message.substring(0, 60)));
 
-        for (let w = 0; w < 30 && !resolved; w++) {
+        for (let w = 0; w < 10 && !resolved; w++) {
             await sleep(500);
             const q = await page.evaluate(() => {
                 try { if (window.MDCore?.wurl) { const u = window.MDCore.wurl; return u.startsWith('//') ? 'https:' + u : u; } } catch(e) {}
@@ -177,7 +182,7 @@ app.post('/extract', async (req, res) => {
         }
         if (resolved) return;
 
-        for (let i = 0; i < 15 && !resolved; i++) {
+        for (let i = 0; i < 25 && !resolved; i++) {
             await page.mouse.click(640+(Math.random()*40-20), 360+(Math.random()*40-20)).catch(() => {});
             await sleep(800);
             if ((i+1) % 3 === 0) {
