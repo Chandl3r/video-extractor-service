@@ -19,23 +19,23 @@ app.use((req, res, next) => {
 function killOrphanChrome() {
     try {
         execSync('pkill -f "chromium|chrome" 2>/dev/null || true', { timeout: 3000 });
-        console.log('[v61] Chrome orfano killato');
+        console.log('[v62] Chrome orfano killato');
     } catch(e) { /* nessun processo da killare */ }
 }
 killOrphanChrome();
 
 process.on('unhandledRejection', (reason) => {
-    console.error('[v61] unhandledRejection:', reason?.message || reason);
+    console.error('[v62] unhandledRejection:', reason?.message || reason);
 });
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v61' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v62' }));
 
 let session = null;
 let proxyChain = Promise.resolve();
 
 function closeSession() {
     if (session) {
-        console.log('[v61] Chiudo sessione');
+        console.log('[v62] Chiudo sessione');
         if (session.browser) session.browser.close().catch(() => {});
         session = null;
         proxyChain = Promise.resolve();
@@ -88,16 +88,16 @@ app.post('/extract', async (req, res) => {
 
     if (session && session.embedUrl === url) {
         session.ts = Date.now();
-        console.log('[v61] Cache hit:', session.videoUrl.substring(0, 60));
+        console.log('[v62] Cache hit:', session.videoUrl.substring(0, 60));
         return res.json({ success: true, video_url: session.videoUrl });
     }
 
     closeSession();
-    console.log('[v61] ESTRAZIONE:', url);
+    console.log('[v62] ESTRAZIONE:', url);
     let browser = null, page = null, resolved = false;
 
     const globalTimeout = setTimeout(() => {
-        console.log('[v61] TIMEOUT');
+        console.log('[v62] TIMEOUT');
         if (!resolved) {
             resolved = true;
             if (page) page.close().catch(() => {});
@@ -121,7 +121,7 @@ app.post('/extract', async (req, res) => {
             const u = request.url();
             if (BLOCK_URLS.some(b => u.includes(b))) { try { request.abort(); } catch(e) {} return; }
             if (looksLikeVideo(u)) {
-                console.log('[v61] Video:', u.substring(0, 80));
+                console.log('[v62] Video:', u.substring(0, 80));
                 interceptorDone = true;
                 try { request.abort(); } catch(e) {}
                 if (!resolved) {
@@ -132,21 +132,19 @@ app.post('/extract', async (req, res) => {
                                 const cdp = await page.target().createCDPSession();
                                 // Forza GC Chrome: libera memoria di mixdrop (50+ script/risorse)
                                 // Tipicamente libera 100-150MB dopo about:blank
-                                // Pulizia RAM Chrome dopo about:blank
-                                // clearBrowserCache non richiede Network.enable
-                                await cdp.send('Network.clearBrowserCache').catch(() => {});
-                                await cdp.send('Network.clearBrowserCookies').catch(() => {});
+                                // Solo GC heap (come v59 che funzionava per 9 chunk)
+                                // clearBrowserCache rompe Fetch.enable - NON usare
                                 await cdp.send('HeapProfiler.enable').catch(() => {});
                                 await cdp.send('HeapProfiler.collectGarbage').catch(() => {});
                                 await cdp.send('HeapProfiler.disable').catch(() => {});
                                 await cdp.send('Fetch.enable', {
                                     patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }]
                                 });
-                                console.log('[v61] ✅ CDP pronto');
+                                console.log('[v62] ✅ CDP pronto');
                                 session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now() };
                                 res.json({ success: true, video_url: u });
                             } catch(e) {
-                                console.error('[v61] CDP err:', e.message);
+                                console.error('[v62] CDP err:', e.message);
                                 if (browser) browser.close().catch(() => {});
                                 res.json({ success: false, message: 'CDP err' });
                             }
@@ -175,7 +173,7 @@ app.post('/extract', async (req, res) => {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'it-IT,it;q=0.9' });
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 })
-            .catch(e => console.log('[v61] goto:', e.message.substring(0, 60)));
+            .catch(e => console.log('[v62] goto:', e.message.substring(0, 60)));
 
         for (let w = 0; w < 10 && !resolved; w++) {
             await sleep(500);
@@ -230,11 +228,11 @@ app.post('/extract', async (req, res) => {
                     }
                     return;
                 }
-                console.log(`[v61] Click ${i+1}: niente`);
+                console.log(`[v62] Click ${i+1}: niente`);
             }
         }
     } catch(e) {
-        console.error('[v61] ERRORE:', e.message);
+        console.error('[v62] ERRORE:', e.message);
         clearTimeout(globalTimeout);
         if (page) page.close().catch(() => {});
         if (!resolved) {
@@ -255,7 +253,7 @@ app.get('/proxy', async (req, res) => {
     console.log(`[proxy] Range:${rangeHeader||'no'} | CDP:${ok?'sì':'NO'} | ${videoUrl.substring(0,50)}`);
     if (!ok) return res.status(503).send('Sessione scaduta, ricarica');
 
-    const CHUNK = 64 * 1024; // 64KB: 4x meno buffer RAM in Node.js
+    const CHUNK = 256 * 1024; // 256KB come v59 che funzionava
     let start = 0, end = CHUNK - 1;
     if (rangeHeader) {
         const m = rangeHeader.match(/bytes=(\d+)-(\d*)/);
@@ -357,4 +355,4 @@ app.get('/proxy', async (req, res) => {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v61 porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v62 porta ${PORT}`));
