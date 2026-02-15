@@ -13,14 +13,14 @@ app.use((req, res, next) => {
     next();
 });
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v49b' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v50' }));
 
 let session = null;
 let proxyChain = Promise.resolve();
 
 function closeSession() {
     if (session) {
-        console.log('[v49] Chiudo sessione');
+        console.log('[v50] Chiudo sessione');
         if (session.browser) session.browser.close().catch(() => {});
         session = null;
         proxyChain = Promise.resolve();
@@ -62,22 +62,38 @@ async function launchBrowser() {
     });
 }
 
+// Setup CDP: naviga about:blank e abilita intercettazione
+async function setupCDP(page) {
+    await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 8000 });
+    const cdp = await page.target().createCDPSession();
+    await cdp.send('Fetch.enable', {
+        patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }]
+    });
+    console.log('[v50] ✅ CDP pronto');
+    return cdp;
+}
+
+// ============================================================
+// EXTRACT: struttura identica a v47 che funzionava
+// interceptor: abort() SYNC, poi goto+CDP nel .then() ASYNC
+// Nessun deadlock: abort() è già chiamato prima di goto
+// ============================================================
 app.post('/extract', async (req, res) => {
     const { url } = req.body;
     if (!url) return res.json({ success: false, message: 'URL mancante' });
 
     if (session && session.embedUrl === url) {
         session.ts = Date.now();
-        console.log('[v49] Cache hit:', session.videoUrl.substring(0, 60));
+        console.log('[v50] Cache hit:', session.videoUrl.substring(0, 60));
         return res.json({ success: true, video_url: session.videoUrl });
     }
 
     closeSession();
-    console.log('[v49] ESTRAZIONE:', url);
+    console.log('[v50] ESTRAZIONE:', url);
     let browser = null, page = null, resolved = false;
 
     const globalTimeout = setTimeout(() => {
-        console.log('[v49] TIMEOUT');
+        console.log('[v50] TIMEOUT');
         if (!resolved) {
             resolved = true;
             if (page) page.close().catch(() => {});
@@ -94,26 +110,35 @@ app.post('/extract', async (req, res) => {
             window.chrome = { runtime: {} };
         });
 
-        let videoUrl = null;
         let interceptorDone = false;
         await page.setRequestInterception(true);
         page.on('request', (request) => {
             if (interceptorDone) { try { request.continue(); } catch(e) {} return; }
             const u = request.url();
-            if (BLOCK_URLS.some(b => u.includes(b))) { try{request.abort();}catch(e){} return; }
-            // Blocca solo immagini e font (sicuri da bloccare)
-            // MAI bloccare 'media','xhr','fetch','script': potrebbero contenere il video URL
+            // Blocca tracker/ads
+            if (BLOCK_URLS.some(b => u.includes(b))) { try { request.abort(); } catch(e) {} return; }
+            // Blocca risorse decorative (sicure da bloccare)
             const rtype = request.resourceType();
-            if (['image','font','stylesheet'].includes(rtype)) {
-                try { request.abort(); } catch(e) {}
-                return;
-            }
+            if (['image', 'font', 'stylesheet'].includes(rtype)) { try { request.abort(); } catch(e) {} return; }
+            // Video trovato!
             if (looksLikeVideo(u)) {
-                console.log('[v49] Video:', u.substring(0, 80));
+                console.log('[v50] Video:', u.substring(0, 80));
                 interceptorDone = true;
-                videoUrl = u;
-                try { request.abort(); } catch(e) {}
-                // Non chiamare goto() dall'interceptor! Usiamo flag + poll
+                try { request.abort(); } catch(e) {} // SYNC: blocca il video (non vogliamo che Chrome lo scarichi)
+                if (!resolved) {
+                    resolved = true; clearTimeout(globalTimeout);
+                    // ASYNC: goto+CDP nel .then() — nessun deadlock perché abort() è già fatto
+                    setupCDP(page)
+                        .then(cdp => {
+                            session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now() };
+                            res.json({ success: true, video_url: u });
+                        })
+                        .catch(e => {
+                            console.error('[v50] CDP err:', e.message);
+                            if (browser) browser.close().catch(() => {});
+                            res.json({ success: false, message: 'CDP fallito' });
+                        });
+                }
                 return;
             }
             try { request.continue(); } catch(e) {}
@@ -121,69 +146,67 @@ app.post('/extract', async (req, res) => {
 
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'it-IT,it;q=0.9' });
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 })
-            .catch(e => console.log('[v49] goto:', e.message.substring(0, 60)));
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+            .catch(e => console.log('[v50] goto:', e.message.substring(0, 60)));
 
-        // Poll: aspetta che interceptor trovi il video O che DOM lo esponga
-        for (let w = 0; w < 60 && !resolved; w++) {
+        // Poll DOM: 15s
+        for (let w = 0; w < 30 && !resolved; w++) {
             await sleep(500);
-            // Check interceptor
-            if (videoUrl) { await setupAndFinish(videoUrl); return; }
-            // Check DOM
             const q = await page.evaluate(() => {
                 try { if (window.MDCore?.wurl) { const u = window.MDCore.wurl; return u.startsWith('//') ? 'https:' + u : u; } } catch(e) {}
                 const m = document.documentElement.innerHTML.match(/"(https?:\/\/[^"]{15,}\.(?:mp4|m3u8)[^"]{0,100})"/);
                 return m?.[1] || null;
             }).catch(() => null);
-            if (q) { await setupAndFinish(q); return; }
+            if (q && !resolved) {
+                resolved = true; clearTimeout(globalTimeout);
+                setupCDP(page)
+                    .then(cdp => {
+                        session = { embedUrl: url, videoUrl: q, browser, page, cdp, ts: Date.now() };
+                        res.json({ success: true, video_url: q });
+                    })
+                    .catch(e => {
+                        if (browser) browser.close().catch(() => {});
+                        res.json({ success: false, message: 'CDP fallito: ' + e.message });
+                    });
+                return;
+            }
         }
         if (resolved) return;
 
+        // Click loop: 12s
         for (let i = 0; i < 15 && !resolved; i++) {
             await page.mouse.click(640+(Math.random()*40-20), 360+(Math.random()*40-20)).catch(() => {});
             await sleep(800);
-            if (videoUrl) { await setupAndFinish(videoUrl); return; }
             if ((i+1) % 3 === 0) {
                 const v = await page.evaluate(() => {
                     try { if (window.MDCore?.wurl) { const u = window.MDCore.wurl; return u.startsWith('//') ? 'https:' + u : u; } } catch(e) {}
                     const m = document.documentElement.innerHTML.match(/"(https?:\/\/[^"]{15,}\.(?:mp4|m3u8)[^"]{0,100})"/);
                     return m?.[1] || null;
                 }).catch(() => null);
-                if (v) { await setupAndFinish(v); return; }
-                console.log(`[v49] Click ${i+1}: niente`);
+                if (v && !resolved) {
+                    resolved = true; clearTimeout(globalTimeout);
+                    setupCDP(page)
+                        .then(cdp => {
+                            session = { embedUrl: url, videoUrl: v, browser, page, cdp, ts: Date.now() };
+                            res.json({ success: true, video_url: v });
+                        })
+                        .catch(e => {
+                            if (browser) browser.close().catch(() => {});
+                            res.json({ success: false, message: 'CDP fallito: ' + e.message });
+                        });
+                    return;
+                }
+                console.log(`[v50] Click ${i+1}: niente`);
             }
         }
     } catch(e) {
-        console.error('[v49] ERRORE:', e.message);
+        console.error('[v50] ERRORE:', e.message);
         clearTimeout(globalTimeout);
         if (page) page.close().catch(() => {});
         if (!resolved) {
             resolved = true;
             if (browser) browser.close().catch(() => {});
             res.json({ success: false, message: 'Errore: ' + e.message });
-        }
-    }
-
-    // Chiamata quando siamo nel loop (fuori dall'interceptor) → goto() sicuro
-    async function setupAndFinish(vUrl) {
-        if (resolved) return;
-        resolved = true; clearTimeout(globalTimeout);
-        console.log('[v49] Setup CDP...');
-        try {
-            // Naviga about:blank: fuori dall'interceptor → nessun deadlock
-            await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 8000 });
-            const cdp = await page.target().createCDPSession();
-            // CDP intercetta richieste video: bypassa CORS senza --disable-web-security
-            await cdp.send('Fetch.enable', {
-                patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }]
-            });
-            console.log('[v49] ✅ CDP pronto');
-            session = { embedUrl: url, videoUrl: vUrl, browser, page, cdp, ts: Date.now() };
-            res.json({ success: true, video_url: vUrl });
-        } catch(e) {
-            console.error('[v49] CDP err:', e.message);
-            if (browser) browser.close().catch(() => {});
-            res.json({ success: false, message: 'CDP fallito: ' + e.message });
         }
     }
 });
@@ -284,4 +307,4 @@ app.get('/proxy', async (req, res) => {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v49 porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v50 porta ${PORT}`));
