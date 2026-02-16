@@ -15,16 +15,16 @@ app.use((req, res, next) => {
 });
 
 try { execSync('pkill -f "chromium|chrome" 2>/dev/null || true', { timeout: 3000 }); } catch(e) {}
-process.on('unhandledRejection', (r) => console.error('[v85] unhandledRejection:', r?.message || r));
+process.on('unhandledRejection', (r) => console.error('[v86] unhandledRejection:', r?.message || r));
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v85' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v86' }));
 
 let session = null;
 let proxyChain = Promise.resolve();
 
 function closeSession() {
     if (session) {
-        console.log('[v85] Chiudo sessione');
+        console.log('[v86] Chiudo sessione');
         if (session.browser) session.browser.close().catch(() => {});
         session = null;
         proxyChain = Promise.resolve();
@@ -78,16 +78,16 @@ app.post('/extract', async (req, res) => {
 
     if (session && session.embedUrl === url) {
         session.ts = Date.now();
-        console.log('[v85] Cache hit:', session.videoUrl.substring(0, 60));
+        console.log('[v86] Cache hit:', session.videoUrl.substring(0, 60));
         return res.json({ success: true, video_url: session.videoUrl });
     }
 
     closeSession();
-    console.log('[v85] ESTRAZIONE:', url);
+    console.log('[v86] ESTRAZIONE:', url);
     let browser = null, page = null, resolved = false;
 
     const globalTimeout = setTimeout(() => {
-        console.log('[v85] TIMEOUT globale');
+        console.log('[v86] TIMEOUT globale');
         if (!resolved) {
             resolved = true;
             if (page) page.close().catch(() => {});
@@ -101,7 +101,13 @@ app.post('/extract', async (req, res) => {
         await cdp.send('Fetch.enable', {
             patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }]
         });
-        console.log('[v85] ✅ CDP pronto');
+        // CRITICO: CDP ha bisogno di tempo per propagarsi in Chrome dopo Fetch.enable.
+        // Senza questo delay, la prima fetch del proxy viene lanciata prima che
+        // Chrome abbia il filtro attivo → Fetch.requestPaused non scatta → timeout.
+        // Dimostrato dal confronto v82 (no sleep → timeout) vs v83-diag (2s sleep → intercetta).
+        // 1500ms è un compromesso: abbastanza per CDP, non troppo per la UX.
+        await sleep(1500);
+        console.log('[v86] ✅ CDP pronto (propagazione completata)');
         session = { embedUrl: url, videoUrl, browser, page, cdp, ts: Date.now() };
         res.json({ success: true, video_url: videoUrl });
     }
@@ -131,17 +137,16 @@ app.post('/extract', async (req, res) => {
             const u = request.url();
             if (BLOCK_URLS.some(b => u.includes(b))) { try { request.abort(); } catch(e) {} return; }
             if (looksLikeVideo(u)) {
-                console.log('[v85] Video trovato:', u.substring(0, 80));
+                console.log('[v86] Video trovato:', u.substring(0, 80));
                 interceptorDone = true;
-                // *** FIX CRITICO: NON abbortire la richiesta video originale ***
-                // request.abort() invalida il token firmato sul CDN → 403 sul proxy
-                // request.continue() lascia che Chrome completi la connessione TCP
-                // Il token resta valido per le fetch successive del proxy
-                try { request.continue(); } catch(e) {}
+                // request.abort(): Chrome non ha ancora inviato nulla al CDN (intercept è pre-TCP)
+                // → token NON viene invalidato. Il 403 in v83-diag era token scaduto (2s sleep + tempo estrazione)
+                // request.continue() causava: download attivo → HTTP/2 coalescing → CDP non intercettava proxy fetch
+                try { request.abort(); } catch(e) {}
                 if (!resolved) {
                     resolved = true; clearTimeout(globalTimeout);
                     setupCDP(u).catch(e => {
-                        console.error('[v85] CDP err:', e.message);
+                        console.error('[v86] CDP err:', e.message);
                         if (browser) browser.close().catch(() => {});
                         res.json({ success: false, message: 'CDP err: ' + e.message });
                     });
@@ -154,7 +159,7 @@ app.post('/extract', async (req, res) => {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'it-IT,it;q=0.9' });
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 })
-            .catch(e => console.log('[v85] goto err:', e.message.substring(0, 60)));
+            .catch(e => console.log('[v86] goto err:', e.message.substring(0, 60)));
 
         for (let w = 0; w < 10 && !resolved; w++) {
             await sleep(500);
@@ -166,7 +171,7 @@ app.post('/extract', async (req, res) => {
             if (q && !resolved) {
                 resolved = true; clearTimeout(globalTimeout);
                 interceptorDone = true;
-                console.log('[v85] Video via poll:', q.substring(0, 80));
+                console.log('[v86] Video via poll:', q.substring(0, 80));
                 await setupCDP(q).catch(e => {
                     if (browser) browser.close().catch(() => {});
                     res.json({ success: false, message: 'CDP err: ' + e.message });
@@ -188,18 +193,18 @@ app.post('/extract', async (req, res) => {
                 if (v && !resolved) {
                     resolved = true; clearTimeout(globalTimeout);
                     interceptorDone = true;
-                    console.log('[v85] Video via click:', v.substring(0, 80));
+                    console.log('[v86] Video via click:', v.substring(0, 80));
                     await setupCDP(v).catch(e => {
                         if (browser) browser.close().catch(() => {});
                         res.json({ success: false, message: 'CDP err: ' + e.message });
                     });
                     return;
                 }
-                console.log(`[v85] Click ${i+1}: niente`);
+                console.log(`[v86] Click ${i+1}: niente`);
             }
         }
     } catch(e) {
-        console.error('[v85] ERRORE:', e.message);
+        console.error('[v86] ERRORE:', e.message);
         clearTimeout(globalTimeout);
         if (page) page.close().catch(() => {});
         if (!resolved) {
@@ -265,13 +270,8 @@ app.get('/proxy', async (req, res) => {
                 cdp.on('Fetch.requestPaused', handler);
             });
 
-            // cache: 'no-store' → forza richiesta di rete reale, bypassa cache Chrome
-            // Necessario perché request.continue() durante extract ha già scaricato
-            // i primi bytes del video in cache → senza no-store Chrome li serve da cache
-            // senza fare TCP → CDP non intercetta → timeout
             page.evaluate(async (opts) => {
                 fetch(opts.url, {
-                    cache: 'no-store',
                     headers: { 'Range': opts.range, 'Accept': '*/*', 'Referer': opts.referer }
                 }).catch(() => {});
             }, { url: videoUrl, range: rangeStr, referer: embedSrc || 'https://mixdrop.vip/' }).catch(() => {});
@@ -305,4 +305,4 @@ app.get('/proxy', async (req, res) => {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v85 porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v86 porta ${PORT}`));
