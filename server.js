@@ -17,17 +17,17 @@ app.use((req, res, next) => {
 });
 
 try { execSync('pkill -f "chromium|chrome" 2>/dev/null || true', { timeout: 3000 }); } catch(e) {}
-console.log('[v65] Avvio pulito');
-process.on('unhandledRejection', (r) => console.error('[v65] unhandledRejection:', r?.message || r));
+console.log('[v66] Avvio pulito');
+process.on('unhandledRejection', (r) => console.error('[v66] unhandledRejection:', r?.message || r));
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v65' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v66' }));
 
 // Sessione: solo videoUrl e embedUrl — Chrome chiuso subito dopo extract
 let session = null;
 
 function closeSession() {
     if (session) {
-        console.log('[v65] Chiudo sessione');
+        console.log('[v66] Chiudo sessione');
         session = null;
     }
 }
@@ -72,16 +72,16 @@ app.post('/extract', async (req, res) => {
 
     if (session && session.embedUrl === url) {
         session.ts = Date.now();
-        console.log('[v65] Cache hit:', session.videoUrl.substring(0, 60));
+        console.log('[v66] Cache hit:', session.videoUrl.substring(0, 60));
         return res.json({ success: true, video_url: session.videoUrl });
     }
 
     closeSession();
-    console.log('[v65] ESTRAZIONE:', url);
+    console.log('[v66] ESTRAZIONE:', url);
     let browser = null, page = null, resolved = false;
 
     const globalTimeout = setTimeout(() => {
-        console.log('[v65] TIMEOUT');
+        console.log('[v66] TIMEOUT');
         if (!resolved) {
             resolved = true;
             if (browser) browser.close().catch(() => {});
@@ -94,12 +94,22 @@ app.post('/extract', async (req, res) => {
         if (resolved) return;
         resolved = true;
         clearTimeout(globalTimeout);
-        console.log('[v65] Video:', videoUrl.substring(0, 80));
-        // Chiudi Chrome immediatamente — non serve più
+        console.log('[v66] Video:', videoUrl.substring(0, 80));
+        // Estrai cookie prima di chiudere Chrome — servono per il CDN
+        let cookies = [];
+        try {
+            const all = await page.cookies();
+            // Prendi tutti i cookie (mixdrop li imposta per autorizzare il CDN)
+            cookies = all.map(c => `${c.name}=${c.value}`);
+            console.log('[v66] Cookie estratti:', cookies.length);
+        } catch(e) {}
+        // Estrai User-Agent per simulare richiesta browser
+        let ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+        // Chiudi Chrome — non serve più
         try { await browser.close(); } catch(e) {}
         browser = null; page = null;
-        console.log('[v65] ✅ Chrome chiuso, RAM liberata');
-        session = { embedUrl: url, videoUrl, ts: Date.now() };
+        console.log('[v66] ✅ Chrome chiuso, RAM liberata');
+        session = { embedUrl: url, videoUrl, cookies, ua, ts: Date.now() };
         res.json({ success: true, video_url: videoUrl });
     };
 
@@ -129,7 +139,7 @@ app.post('/extract', async (req, res) => {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'it-IT,it;q=0.9' });
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 })
-            .catch(e => console.log('[v65] goto:', e.message.substring(0, 60)));
+            .catch(e => console.log('[v66] goto:', e.message.substring(0, 60)));
 
         for (let w = 0; w < 10 && !resolved; w++) {
             await sleep(500);
@@ -152,11 +162,11 @@ app.post('/extract', async (req, res) => {
                     return m?.[1] || null;
                 }).catch(() => null);
                 if (v) { await onVideoFound(v); return; }
-                console.log(`[v65] Click ${i+1}: niente`);
+                console.log(`[v66] Click ${i+1}: niente`);
             }
         }
     } catch(e) {
-        console.error('[v65] ERRORE:', e.message);
+        console.error('[v66] ERRORE:', e.message);
         clearTimeout(globalTimeout);
         if (!resolved) {
             resolved = true;
@@ -176,12 +186,14 @@ app.get('/proxy', async (req, res) => {
     const rangeHeader = req.headers['range'];
     console.log(`[proxy] Range:${rangeHeader||'no'} | ${videoUrl.substring(0,50)}`);
 
+    const cookies = session.cookies || [];
     const headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'User-Agent': session.ua || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': '*/*',
         'Referer': embedSrc || 'https://mixdrop.vip/',
         'Origin': 'https://mixdrop.vip',
     };
+    if (cookies.length > 0) headers['Cookie'] = cookies.join('; ');
     if (rangeHeader) headers['Range'] = rangeHeader;
 
     const parsed = new URL(videoUrl);
@@ -221,4 +233,4 @@ app.get('/proxy', async (req, res) => {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v65 porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v66 porta ${PORT}`));
