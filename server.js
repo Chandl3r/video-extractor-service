@@ -14,18 +14,18 @@ app.use((req, res, next) => {
     next();
 });
 
-// Killa Chrome orfano da crash precedente
+// Solo questi due aggiunti rispetto a v51-diag
 try { execSync('pkill -f "chromium|chrome" 2>/dev/null || true', { timeout: 3000 }); } catch(e) {}
-process.on('unhandledRejection', (r) => console.error('[v75] unhandledRejection:', r?.message || r));
+process.on('unhandledRejection', (r) => console.error('[v76] unhandledRejection:', r?.message || r));
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v75' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v76' }));
 
 let session = null;
 let proxyChain = Promise.resolve();
 
 function closeSession() {
     if (session) {
-        console.log('[v75] Chiudo sessione');
+        console.log('[v76] Chiudo sessione');
         if (session.browser) session.browser.close().catch(() => {});
         session = null;
         proxyChain = Promise.resolve();
@@ -43,14 +43,9 @@ function withProxyLock(fn) {
 }
 
 const VIDEO_EXTS = ['.mp4', '.m3u8', '.webm', '.ts'];
+// Identica a v51-diag — lista minima che funzionava
 const BLOCK_URLS = ['google-analytics','googletagmanager','doubleclick',
-                    'googlesyndication','adsco.re','xadsmart','facebook.net',
-                    'adexchangeclear','inadsexchange','protrafficinspector',
-                    'dogcollarfavourbluff','preferencenail','realizationnewest',
-                    'inklinkor','weirdopt','displayvertising','oyo4d.com',
-                    'rtmark.net','mdstats.info','lastingillipe','fjhvwqjimr',
-                    'jnbhi.com','dcbogyqtfxolp','creative-sb1','show-creative1',
-                    'wayfarerorthodox.com','djtdmgwjbq.com','acscdn.com','asacdn.com'];
+                    'googlesyndication','adsco.re','xadsmart','facebook.net'];
 
 function looksLikeVideo(url) {
     const u = url.toLowerCase();
@@ -59,13 +54,13 @@ function looksLikeVideo(url) {
 }
 
 async function launchBrowser() {
+    // Identici a v51-diag — zero flags extra
     return puppeteer.launch({
         args: [...chromium.args,
                '--no-sandbox', '--disable-setuid-sandbox',
                '--disable-dev-shm-usage', '--disable-gpu',
                '--no-first-run', '--no-zygote', '--single-process',
                '--mute-audio', '--disable-blink-features=AutomationControlled',
-               '--js-flags=--expose-gc',
                '--disable-web-security', '--allow-running-insecure-content'],
         defaultViewport: { width: 1280, height: 720 },
         executablePath: await chromium.executablePath(),
@@ -80,16 +75,16 @@ app.post('/extract', async (req, res) => {
 
     if (session && session.embedUrl === url) {
         session.ts = Date.now();
-        console.log('[v75] Cache hit:', session.videoUrl.substring(0, 60));
+        console.log('[v76] Cache hit:', session.videoUrl.substring(0, 60));
         return res.json({ success: true, video_url: session.videoUrl });
     }
 
     closeSession();
-    console.log('[v75] ESTRAZIONE:', url);
+    console.log('[v76] ESTRAZIONE:', url);
     let browser = null, page = null, resolved = false;
 
     const globalTimeout = setTimeout(() => {
-        console.log('[v75] TIMEOUT');
+        console.log('[v76] TIMEOUT');
         if (!resolved) {
             resolved = true;
             if (page) page.close().catch(() => {});
@@ -113,7 +108,7 @@ app.post('/extract', async (req, res) => {
             const u = request.url();
             if (BLOCK_URLS.some(b => u.includes(b))) { try { request.abort(); } catch(e) {} return; }
             if (looksLikeVideo(u)) {
-                console.log('[v75] Video:', u.substring(0, 80));
+                console.log('[v76] Video:', u.substring(0, 80));
                 interceptorDone = true;
                 try { request.abort(); } catch(e) {}
                 if (!resolved) {
@@ -121,17 +116,15 @@ app.post('/extract', async (req, res) => {
                     page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 })
                         .then(async () => {
                             try {
-                                // GC via JS flag: libera V8 heap mixdrop senza toccare CDP Fetch
-                                await page.evaluate(() => { try { gc(); } catch(e) {} }).catch(() => {});
                                 const cdp = await page.target().createCDPSession();
                                 await cdp.send('Fetch.enable', {
                                     patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }]
                                 });
-                                console.log('[v75] ✅ CDP pronto');
+                                console.log('[v76] ✅ CDP pronto');
                                 session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now() };
                                 res.json({ success: true, video_url: u });
                             } catch(e) {
-                                console.error('[v75] CDP err:', e.message);
+                                console.error('[v76] CDP err:', e.message);
                                 if (browser) browser.close().catch(() => {});
                                 res.json({ success: false, message: 'CDP err' });
                             }
@@ -160,7 +153,7 @@ app.post('/extract', async (req, res) => {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'it-IT,it;q=0.9' });
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 })
-            .catch(e => console.log('[v75] goto:', e.message.substring(0, 60)));
+            .catch(e => console.log('[v76] goto:', e.message.substring(0, 60)));
 
         for (let w = 0; w < 10 && !resolved; w++) {
             await sleep(500);
@@ -173,7 +166,6 @@ app.post('/extract', async (req, res) => {
                 resolved = true; clearTimeout(globalTimeout);
                 try {
                     await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
-                    await page.evaluate(() => { try { gc(); } catch(e) {} }).catch(() => {});
                     const cdp = await page.target().createCDPSession();
                     await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }] });
                     session = { embedUrl: url, videoUrl: q, browser, page, cdp, ts: Date.now() };
@@ -200,7 +192,6 @@ app.post('/extract', async (req, res) => {
                     resolved = true; clearTimeout(globalTimeout);
                     try {
                         await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
-                        await page.evaluate(() => { try { gc(); } catch(e) {} }).catch(() => {});
                         const cdp = await page.target().createCDPSession();
                         await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }] });
                         session = { embedUrl: url, videoUrl: v, browser, page, cdp, ts: Date.now() };
@@ -211,11 +202,11 @@ app.post('/extract', async (req, res) => {
                     }
                     return;
                 }
-                console.log(`[v75] Click ${i+1}: niente`);
+                console.log(`[v76] Click ${i+1}: niente`);
             }
         }
     } catch(e) {
-        console.error('[v75] ERRORE:', e.message);
+        console.error('[v76] ERRORE:', e.message);
         clearTimeout(globalTimeout);
         if (page) page.close().catch(() => {});
         if (!resolved) {
@@ -226,6 +217,7 @@ app.post('/extract', async (req, res) => {
     }
 });
 
+// PROXY: identico a v51-diag che dava 7+ chunk
 app.get('/proxy', async (req, res) => {
     const { url: videoUrl, src: embedSrc } = req.query;
     if (!videoUrl) return res.status(400).send('URL mancante');
@@ -249,16 +241,10 @@ app.get('/proxy', async (req, res) => {
             console.log(`[proxy] CDP fetch: ${rangeStr}`);
             const { page, cdp } = session;
 
+            // Identico a v51-diag: timeout semplice, nessun recreate
             const streamReady = new Promise((resolve, reject) => {
-                const timer = setTimeout(async () => {
+                const timer = setTimeout(() => {
                     cdp.removeListener('Fetch.requestPaused', handler);
-                    try {
-                        await cdp.detach().catch(() => {});
-                        const newCdp = await session.page.target().createCDPSession();
-                        await newCdp.send('Fetch.enable', { patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }] });
-                        session.cdp = newCdp;
-                        console.log('[proxy] CDP ricreato');
-                    } catch(e) {}
                     reject(new Error('Timeout CDP 25s'));
                 }, 25000);
 
@@ -285,11 +271,7 @@ app.get('/proxy', async (req, res) => {
                 cdp.on('Fetch.requestPaused', handler);
             });
 
-            // FIX OOM: await fetch() risolve agli headers (non al body)
-            // CDP ha già preso il body → r.body.cancel() libera Chrome immediatamente
-            // Nessun accumulo: ogni chunk = 0 byte residui nel renderer
-            // Fire-and-forget: dopo takeResponseBodyAsStream il body è nell'IO pipe
-            // del browser process (non nel renderer V8) → zero accumulo RAM
+            // Identico a v51-diag
             page.evaluate(async (opts) => {
                 fetch(opts.url, {
                     headers: { 'Range': opts.range, 'Accept': '*/*', 'Referer': opts.referer }
@@ -310,11 +292,7 @@ app.get('/proxy', async (req, res) => {
             while (true) {
                 const chunk = await cdp.send('IO.read', { handle: stream, size: 65536 });
                 const buf = chunk.base64Encoded ? Buffer.from(chunk.data, 'base64') : Buffer.from(chunk.data, 'binary');
-                if (buf.length > 0) {
-                    const canContinue = res.write(buf);
-                    total += buf.length;
-                    if (!canContinue) await new Promise(r => res.once('drain', r));
-                }
+                if (buf.length > 0) { res.write(buf); total += buf.length; }
                 if (chunk.eof) break;
             }
             res.end();
@@ -330,4 +308,4 @@ app.get('/proxy', async (req, res) => {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v75 porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v76 porta ${PORT}`));
