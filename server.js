@@ -1,8 +1,6 @@
 const express = require('express');
 const puppeteer = require('puppeteer-core');
 const chromium = require('@sparticuz/chromium');
-const https = require('https');
-const http = require('http');
 const { execSync } = require('child_process');
 
 const app = express();
@@ -17,33 +15,38 @@ app.use((req, res, next) => {
 });
 
 try { execSync('pkill -f "chromium|chrome" 2>/dev/null || true', { timeout: 3000 }); } catch(e) {}
-console.log('[v66] Avvio pulito');
-process.on('unhandledRejection', (r) => console.error('[v66] unhandledRejection:', r?.message || r));
+console.log('[v67] Avvio pulito');
+process.on('unhandledRejection', (r) => console.error('[v67] unhandledRejection:', r?.message || r));
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v66' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v67' }));
 
-// Sessione: solo videoUrl e embedUrl — Chrome chiuso subito dopo extract
 let session = null;
+let proxyChain = Promise.resolve();
 
 function closeSession() {
     if (session) {
-        console.log('[v66] Chiudo sessione');
+        console.log('[v67] Chiudo sessione');
+        if (session.browser) session.browser.close().catch(() => {});
         session = null;
+        proxyChain = Promise.resolve();
     }
 }
+setInterval(() => { if (session && Date.now() - session.ts > 15*60*1000) closeSession(); }, 60000);
 
-setInterval(() => {
-    if (session && Date.now() - session.ts > 15 * 60 * 1000) closeSession();
-}, 60000);
+function withProxyLock(fn) {
+    const result = proxyChain.then(() => fn());
+    proxyChain = result.catch(() => {});
+    return result;
+}
 
-const VIDEO_EXTS = ['.mp4', '.m3u8', '.webm', '.ts'];
+const VIDEO_EXTS = ['.mp4','.m3u8','.webm','.ts'];
 const BLOCK_URLS = ['google-analytics','googletagmanager','doubleclick',
-                    'googlesyndication','adsco.re','xadsmart','facebook.net',
-                    'adexchangeclear','inadsexchange','protrafficinspector',
-                    'dogcollarfavourbluff','preferencenail','realizationnewest',
-                    'inklinkor','weirdopt','displayvertising','oyo4d.com',
-                    'rtmark.net','mdstats.info','lastingillipe','fjhvwqjimr',
-                    'jnbhi.com','dcbogyqtfxolp','creative-sb1','show-creative1'];
+    'googlesyndication','adsco.re','xadsmart','facebook.net',
+    'adexchangeclear','inadsexchange','protrafficinspector',
+    'dogcollarfavourbluff','preferencenail','realizationnewest',
+    'inklinkor','weirdopt','displayvertising','oyo4d.com',
+    'rtmark.net','mdstats.info','lastingillipe','fjhvwqjimr',
+    'jnbhi.com','dcbogyqtfxolp','creative-sb1','show-creative1'];
 
 function looksLikeVideo(url) {
     const u = url.toLowerCase();
@@ -54,16 +57,27 @@ function looksLikeVideo(url) {
 async function launchBrowser() {
     return puppeteer.launch({
         args: [...chromium.args,
-               '--no-sandbox', '--disable-setuid-sandbox',
-               '--disable-dev-shm-usage', '--disable-gpu',
-               '--no-first-run', '--no-zygote', '--single-process',
-               '--mute-audio', '--disable-blink-features=AutomationControlled',
-               '--disable-web-security', '--allow-running-insecure-content'],
+            '--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage',
+            '--disable-gpu','--no-first-run','--no-zygote','--single-process',
+            '--mute-audio','--disable-blink-features=AutomationControlled',
+            '--disable-web-security','--allow-running-insecure-content'],
         defaultViewport: { width: 1280, height: 720 },
         executablePath: await chromium.executablePath(),
         headless: chromium.headless,
         ignoreHTTPSErrors: true,
     });
+}
+
+async function setupCDP(page) {
+    const cdp = await page.target().createCDPSession();
+    // GC heap dopo about:blank — NON usare Network.* (rompe Fetch interceptor)
+    await cdp.send('HeapProfiler.enable').catch(() => {});
+    await cdp.send('HeapProfiler.collectGarbage').catch(() => {});
+    await cdp.send('HeapProfiler.disable').catch(() => {});
+    await cdp.send('Fetch.enable', {
+        patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }]
+    });
+    return cdp;
 }
 
 app.post('/extract', async (req, res) => {
@@ -72,45 +86,34 @@ app.post('/extract', async (req, res) => {
 
     if (session && session.embedUrl === url) {
         session.ts = Date.now();
-        console.log('[v66] Cache hit:', session.videoUrl.substring(0, 60));
+        console.log('[v67] Cache hit:', session.videoUrl.substring(0, 60));
         return res.json({ success: true, video_url: session.videoUrl });
     }
 
     closeSession();
-    console.log('[v66] ESTRAZIONE:', url);
+    console.log('[v67] ESTRAZIONE:', url);
     let browser = null, page = null, resolved = false;
 
     const globalTimeout = setTimeout(() => {
-        console.log('[v66] TIMEOUT');
-        if (!resolved) {
-            resolved = true;
-            if (browser) browser.close().catch(() => {});
-            res.json({ success: false, message: 'Timeout' });
-        }
+        if (!resolved) { resolved = true; if (browser) browser.close().catch(()=>{}); res.json({ success: false, message: 'Timeout' }); }
+        console.log('[v67] TIMEOUT');
     }, 120000);
 
-    // Callback quando troviamo il video: chiude Chrome subito
-    const onVideoFound = async (videoUrl) => {
+    const onFound = async (u) => {
         if (resolved) return;
-        resolved = true;
-        clearTimeout(globalTimeout);
-        console.log('[v66] Video:', videoUrl.substring(0, 80));
-        // Estrai cookie prima di chiudere Chrome — servono per il CDN
-        let cookies = [];
+        resolved = true; clearTimeout(globalTimeout);
+        console.log('[v67] Video:', u.substring(0, 80));
         try {
-            const all = await page.cookies();
-            // Prendi tutti i cookie (mixdrop li imposta per autorizzare il CDN)
-            cookies = all.map(c => `${c.name}=${c.value}`);
-            console.log('[v66] Cookie estratti:', cookies.length);
-        } catch(e) {}
-        // Estrai User-Agent per simulare richiesta browser
-        let ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-        // Chiudi Chrome — non serve più
-        try { await browser.close(); } catch(e) {}
-        browser = null; page = null;
-        console.log('[v66] ✅ Chrome chiuso, RAM liberata');
-        session = { embedUrl: url, videoUrl, cookies, ua, ts: Date.now() };
-        res.json({ success: true, video_url: videoUrl });
+            await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
+            const cdp = await setupCDP(page);
+            console.log('[v67] ✅ CDP pronto');
+            session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now() };
+            res.json({ success: true, video_url: u });
+        } catch(e) {
+            console.error('[v67] CDP err:', e.message);
+            if (browser) browser.close().catch(() => {});
+            res.json({ success: false, message: 'CDP err' });
+        }
     };
 
     try {
@@ -130,7 +133,7 @@ app.post('/extract', async (req, res) => {
             if (looksLikeVideo(u)) {
                 interceptorDone = true;
                 try { request.abort(); } catch(e) {}
-                onVideoFound(u);
+                onFound(u);
                 return;
             }
             try { request.continue(); } catch(e) {}
@@ -138,17 +141,16 @@ app.post('/extract', async (req, res) => {
 
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'it-IT,it;q=0.9' });
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 })
-            .catch(e => console.log('[v66] goto:', e.message.substring(0, 60)));
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(e => console.log('[v67] goto:', e.message.substring(0,60)));
 
         for (let w = 0; w < 10 && !resolved; w++) {
             await sleep(500);
             const q = await page.evaluate(() => {
-                try { if (window.MDCore?.wurl) { const u = window.MDCore.wurl; return u.startsWith('//') ? 'https:' + u : u; } } catch(e) {}
+                try { if (window.MDCore?.wurl) { const u = window.MDCore.wurl; return u.startsWith('//') ? 'https:'+u : u; } } catch(e) {}
                 const m = document.documentElement.innerHTML.match(/"(https?:\/\/[^"]{15,}\.(?:mp4|m3u8)[^"]{0,100})"/);
                 return m?.[1] || null;
             }).catch(() => null);
-            if (q) { await onVideoFound(q); return; }
+            if (q) { await onFound(q); return; }
         }
         if (resolved) return;
 
@@ -157,80 +159,123 @@ app.post('/extract', async (req, res) => {
             await sleep(800);
             if ((i+1) % 3 === 0) {
                 const v = await page.evaluate(() => {
-                    try { if (window.MDCore?.wurl) { const u = window.MDCore.wurl; return u.startsWith('//') ? 'https:' + u : u; } } catch(e) {}
+                    try { if (window.MDCore?.wurl) { const u = window.MDCore.wurl; return u.startsWith('//') ? 'https:'+u : u; } } catch(e) {}
                     const m = document.documentElement.innerHTML.match(/"(https?:\/\/[^"]{15,}\.(?:mp4|m3u8)[^"]{0,100})"/);
                     return m?.[1] || null;
                 }).catch(() => null);
-                if (v) { await onVideoFound(v); return; }
-                console.log(`[v66] Click ${i+1}: niente`);
+                if (v) { await onFound(v); return; }
+                console.log(`[v67] Click ${i+1}: niente`);
             }
         }
     } catch(e) {
-        console.error('[v66] ERRORE:', e.message);
+        console.error('[v67] ERRORE:', e.message);
         clearTimeout(globalTimeout);
-        if (!resolved) {
-            resolved = true;
-            if (browser) browser.close().catch(() => {});
-            res.json({ success: false, message: 'Errore: ' + e.message });
-        }
+        if (!resolved) { resolved = true; if (browser) browser.close().catch(()=>{}); res.json({ success: false, message: e.message }); }
     }
 });
 
-// PROXY: Node.js https diretto — Chrome non serve più durante streaming
-// RAM: ~50MB invece di 250MB
 app.get('/proxy', async (req, res) => {
     const { url: videoUrl, src: embedSrc } = req.query;
     if (!videoUrl) return res.status(400).send('URL mancante');
-    if (!session) return res.status(503).send('Sessione scaduta, ricarica');
 
     const rangeHeader = req.headers['range'];
-    console.log(`[proxy] Range:${rangeHeader||'no'} | ${videoUrl.substring(0,50)}`);
+    const ok = session && session.cdp;
+    console.log(`[proxy] Range:${rangeHeader||'no'} | CDP:${ok?'sì':'NO'} | ${videoUrl.substring(0,50)}`);
+    if (!ok) return res.status(503).send('Sessione scaduta, ricarica');
 
-    const cookies = session.cookies || [];
-    const headers = {
-        'User-Agent': session.ua || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': '*/*',
-        'Referer': embedSrc || 'https://mixdrop.vip/',
-        'Origin': 'https://mixdrop.vip',
-    };
-    if (cookies.length > 0) headers['Cookie'] = cookies.join('; ');
-    if (rangeHeader) headers['Range'] = rangeHeader;
+    const CHUNK = 256 * 1024;
+    let start = 0, end = CHUNK - 1;
+    if (rangeHeader) {
+        const m = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+        if (m) { start = parseInt(m[1]); end = m[2] ? Math.min(parseInt(m[2]), start+CHUNK-1) : start+CHUNK-1; }
+    }
+    const rangeStr = `bytes=${start}-${end}`;
 
-    const parsed = new URL(videoUrl);
-    const lib = parsed.protocol === 'https:' ? https : http;
+    try {
+        await withProxyLock(async () => {
+            if (!session?.cdp) throw new Error('Sessione persa');
+            console.log(`[proxy] CDP fetch: ${rangeStr}`);
+            const { page } = session;
+            const cdp = session.cdp;
 
-    const proxyReq = lib.request({
-        hostname: parsed.hostname,
-        path: parsed.pathname + parsed.search,
-        method: 'GET',
-        headers,
-    }, (proxyRes) => {
-        const status = proxyRes.statusCode;
-        console.log(`[proxy] ✅ ${status} | ${proxyRes.headers['content-type']} | ${proxyRes.headers['content-length']}b`);
+            const streamReady = new Promise((resolve, reject) => {
+                const timer = setTimeout(async () => {
+                    cdp.removeListener('Fetch.requestPaused', handler);
+                    try {
+                        await cdp.detach().catch(() => {});
+                        session.cdp = await setupCDP(session.page);
+                        console.log('[proxy] CDP ricreato');
+                    } catch(e) {}
+                    reject(new Error('Timeout CDP 25s'));
+                }, 25000);
 
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Accept-Ranges', 'bytes');
-        if (proxyRes.headers['content-type']) res.setHeader('Content-Type', proxyRes.headers['content-type']);
-        if (proxyRes.headers['content-length']) res.setHeader('Content-Length', proxyRes.headers['content-length']);
-        if (proxyRes.headers['content-range']) res.setHeader('Content-Range', proxyRes.headers['content-range']);
-        res.status(status);
+                const handler = async (ev) => {
+                    if (ev.responseStatusCode === undefined) {
+                        await cdp.send('Fetch.continueRequest', { requestId: ev.requestId }).catch(() => {}); return;
+                    }
+                    clearTimeout(timer);
+                    cdp.removeListener('Fetch.requestPaused', handler);
+                    const status = ev.responseStatusCode;
+                    const hdrs = ev.responseHeaders || [];
+                    const ct = hdrs.find(h=>h.name.toLowerCase()==='content-type')?.value || 'video/mp4';
+                    const cr = hdrs.find(h=>h.name.toLowerCase()==='content-range')?.value || '';
+                    const cl = hdrs.find(h=>h.name.toLowerCase()==='content-length')?.value || '';
+                    if (status >= 400) {
+                        await cdp.send('Fetch.continueRequest', { requestId: ev.requestId }).catch(() => {});
+                        reject(new Error(`HTTP ${status}`)); return;
+                    }
+                    try {
+                        const { stream } = await cdp.send('Fetch.takeResponseBodyAsStream', { requestId: ev.requestId });
+                        resolve({ stream, status, ct, cr, cl });
+                    } catch(e) { reject(e); }
+                };
+                cdp.on('Fetch.requestPaused', handler);
+            });
 
-        proxyRes.pipe(res);
-        proxyRes.on('end', () => {
-            console.log(`[proxy] ✅ Completato`);
+            // FIX OOM: cancella il response body nel renderer dopo che CDP l'ha preso
+            // Senza r.body.cancel(), il browser accumula i body non consumati → OOM
+            page.evaluate(async (opts) => {
+                try {
+                    const r = await fetch(opts.url, {
+                        headers: { 'Range': opts.range, 'Accept': '*/*', 'Referer': opts.referer }
+                    });
+                    // Cancella subito il body — CDP lo ha già intercettato
+                    if (r.body) r.body.cancel();
+                } catch(e) {}
+            }, { url: videoUrl, range: rangeStr, referer: embedSrc || 'https://mixdrop.vip/' }).catch(() => {});
+
+            const { stream, status, ct, cr, cl } = await streamReady;
+            console.log(`[proxy] ✅ ${status} | ${ct} | ${cl}b`);
+
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            res.setHeader('Accept-Ranges', 'bytes');
+            res.setHeader('Content-Type', ct);
+            if (cl) res.setHeader('Content-Length', cl);
+            if (cr) res.setHeader('Content-Range', cr);
+            res.status(status === 206 ? 206 : 200);
+
+            let total = 0;
+            while (true) {
+                const chunk = await cdp.send('IO.read', { handle: stream, size: 65536 });
+                const buf = chunk.base64Encoded ? Buffer.from(chunk.data, 'base64') : Buffer.from(chunk.data, 'binary');
+                if (buf.length > 0) {
+                    const canContinue = res.write(buf);
+                    total += buf.length;
+                    if (!canContinue) await new Promise(r => res.once('drain', r));
+                }
+                if (chunk.eof) break;
+            }
+            res.end();
+            await cdp.send('IO.close', { handle: stream }).catch(() => {});
+            console.log(`[proxy] ✅ Completato: ${total}b`);
             if (session) session.ts = Date.now();
         });
-    });
-
-    proxyReq.on('error', (e) => {
+    } catch(e) {
         console.error('[proxy] ERRORE:', e.message);
         if (!res.headersSent) res.status(500).send('Errore: ' + e.message);
-    });
-
-    req.on('close', () => proxyReq.destroy());
-    proxyReq.end();
+    }
 });
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v66 porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v67 porta ${PORT}`));
