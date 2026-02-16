@@ -16,16 +16,16 @@ app.use((req, res, next) => {
 
 // Killa Chrome orfano da crash precedente
 try { execSync('pkill -f "chromium|chrome" 2>/dev/null || true', { timeout: 3000 }); } catch(e) {}
-process.on('unhandledRejection', (r) => console.error('[v74] unhandledRejection:', r?.message || r));
+process.on('unhandledRejection', (r) => console.error('[v75] unhandledRejection:', r?.message || r));
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v74' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v75' }));
 
 let session = null;
 let proxyChain = Promise.resolve();
 
 function closeSession() {
     if (session) {
-        console.log('[v74] Chiudo sessione');
+        console.log('[v75] Chiudo sessione');
         if (session.browser) session.browser.close().catch(() => {});
         session = null;
         proxyChain = Promise.resolve();
@@ -65,6 +65,7 @@ async function launchBrowser() {
                '--disable-dev-shm-usage', '--disable-gpu',
                '--no-first-run', '--no-zygote', '--single-process',
                '--mute-audio', '--disable-blink-features=AutomationControlled',
+               '--js-flags=--expose-gc',
                '--disable-web-security', '--allow-running-insecure-content'],
         defaultViewport: { width: 1280, height: 720 },
         executablePath: await chromium.executablePath(),
@@ -79,16 +80,16 @@ app.post('/extract', async (req, res) => {
 
     if (session && session.embedUrl === url) {
         session.ts = Date.now();
-        console.log('[v74] Cache hit:', session.videoUrl.substring(0, 60));
+        console.log('[v75] Cache hit:', session.videoUrl.substring(0, 60));
         return res.json({ success: true, video_url: session.videoUrl });
     }
 
     closeSession();
-    console.log('[v74] ESTRAZIONE:', url);
+    console.log('[v75] ESTRAZIONE:', url);
     let browser = null, page = null, resolved = false;
 
     const globalTimeout = setTimeout(() => {
-        console.log('[v74] TIMEOUT');
+        console.log('[v75] TIMEOUT');
         if (!resolved) {
             resolved = true;
             if (page) page.close().catch(() => {});
@@ -112,7 +113,7 @@ app.post('/extract', async (req, res) => {
             const u = request.url();
             if (BLOCK_URLS.some(b => u.includes(b))) { try { request.abort(); } catch(e) {} return; }
             if (looksLikeVideo(u)) {
-                console.log('[v74] Video:', u.substring(0, 80));
+                console.log('[v75] Video:', u.substring(0, 80));
                 interceptorDone = true;
                 try { request.abort(); } catch(e) {}
                 if (!resolved) {
@@ -120,18 +121,17 @@ app.post('/extract', async (req, res) => {
                     page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 })
                         .then(async () => {
                             try {
+                                // GC via JS flag: libera V8 heap mixdrop senza toccare CDP Fetch
+                                await page.evaluate(() => { try { gc(); } catch(e) {} }).catch(() => {});
                                 const cdp = await page.target().createCDPSession();
-                                await cdp.send('HeapProfiler.enable').catch(() => {});
-                                await cdp.send('HeapProfiler.collectGarbage').catch(() => {});
-                                await cdp.send('HeapProfiler.disable').catch(() => {});
                                 await cdp.send('Fetch.enable', {
                                     patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }]
                                 });
-                                console.log('[v74] ✅ CDP pronto');
+                                console.log('[v75] ✅ CDP pronto');
                                 session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now() };
                                 res.json({ success: true, video_url: u });
                             } catch(e) {
-                                console.error('[v74] CDP err:', e.message);
+                                console.error('[v75] CDP err:', e.message);
                                 if (browser) browser.close().catch(() => {});
                                 res.json({ success: false, message: 'CDP err' });
                             }
@@ -140,9 +140,6 @@ app.post('/extract', async (req, res) => {
                             setTimeout(async () => {
                                 try {
                                     const cdp = await page.target().createCDPSession();
-                                    await cdp.send('HeapProfiler.enable').catch(() => {});
-                                    await cdp.send('HeapProfiler.collectGarbage').catch(() => {});
-                                    await cdp.send('HeapProfiler.disable').catch(() => {});
                                     await cdp.send('Fetch.enable', {
                                         patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }]
                                     });
@@ -163,7 +160,7 @@ app.post('/extract', async (req, res) => {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'it-IT,it;q=0.9' });
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 })
-            .catch(e => console.log('[v74] goto:', e.message.substring(0, 60)));
+            .catch(e => console.log('[v75] goto:', e.message.substring(0, 60)));
 
         for (let w = 0; w < 10 && !resolved; w++) {
             await sleep(500);
@@ -176,10 +173,8 @@ app.post('/extract', async (req, res) => {
                 resolved = true; clearTimeout(globalTimeout);
                 try {
                     await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
+                    await page.evaluate(() => { try { gc(); } catch(e) {} }).catch(() => {});
                     const cdp = await page.target().createCDPSession();
-                    await cdp.send('HeapProfiler.enable').catch(() => {});
-                    await cdp.send('HeapProfiler.collectGarbage').catch(() => {});
-                    await cdp.send('HeapProfiler.disable').catch(() => {});
                     await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }] });
                     session = { embedUrl: url, videoUrl: q, browser, page, cdp, ts: Date.now() };
                     res.json({ success: true, video_url: q });
@@ -205,10 +200,8 @@ app.post('/extract', async (req, res) => {
                     resolved = true; clearTimeout(globalTimeout);
                     try {
                         await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
+                        await page.evaluate(() => { try { gc(); } catch(e) {} }).catch(() => {});
                         const cdp = await page.target().createCDPSession();
-                        await cdp.send('HeapProfiler.enable').catch(() => {});
-                        await cdp.send('HeapProfiler.collectGarbage').catch(() => {});
-                        await cdp.send('HeapProfiler.disable').catch(() => {});
                         await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }] });
                         session = { embedUrl: url, videoUrl: v, browser, page, cdp, ts: Date.now() };
                         res.json({ success: true, video_url: v });
@@ -218,11 +211,11 @@ app.post('/extract', async (req, res) => {
                     }
                     return;
                 }
-                console.log(`[v74] Click ${i+1}: niente`);
+                console.log(`[v75] Click ${i+1}: niente`);
             }
         }
     } catch(e) {
-        console.error('[v74] ERRORE:', e.message);
+        console.error('[v75] ERRORE:', e.message);
         clearTimeout(globalTimeout);
         if (page) page.close().catch(() => {});
         if (!resolved) {
@@ -337,4 +330,4 @@ app.get('/proxy', async (req, res) => {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v74 porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v75 porta ${PORT}`));
