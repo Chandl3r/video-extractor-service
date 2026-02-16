@@ -14,24 +14,30 @@ app.use((req, res, next) => {
     next();
 });
 
+// Killa Chrome orfano da crash precedente (evita 2x Chrome = OOM)
 try { execSync('pkill -f "chromium|chrome" 2>/dev/null || true', { timeout: 3000 }); } catch(e) {}
-console.log('[v67] Avvio pulito');
-process.on('unhandledRejection', (r) => console.error('[v67] unhandledRejection:', r?.message || r));
+console.log('[v68] Avvio pulito');
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v67' }));
+// Previene crash Node.js v25 per unhandledRejection
+process.on('unhandledRejection', (r) => console.error('[v68] unhandledRejection:', r?.message || r));
+
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v68' }));
 
 let session = null;
 let proxyChain = Promise.resolve();
 
 function closeSession() {
     if (session) {
-        console.log('[v67] Chiudo sessione');
+        console.log('[v68] Chiudo sessione');
         if (session.browser) session.browser.close().catch(() => {});
         session = null;
         proxyChain = Promise.resolve();
     }
 }
-setInterval(() => { if (session && Date.now() - session.ts > 15*60*1000) closeSession(); }, 60000);
+
+setInterval(() => {
+    if (session && Date.now() - session.ts > 15 * 60 * 1000) closeSession();
+}, 60000);
 
 function withProxyLock(fn) {
     const result = proxyChain.then(() => fn());
@@ -39,14 +45,14 @@ function withProxyLock(fn) {
     return result;
 }
 
-const VIDEO_EXTS = ['.mp4','.m3u8','.webm','.ts'];
+const VIDEO_EXTS = ['.mp4', '.m3u8', '.webm', '.ts'];
 const BLOCK_URLS = ['google-analytics','googletagmanager','doubleclick',
-    'googlesyndication','adsco.re','xadsmart','facebook.net',
-    'adexchangeclear','inadsexchange','protrafficinspector',
-    'dogcollarfavourbluff','preferencenail','realizationnewest',
-    'inklinkor','weirdopt','displayvertising','oyo4d.com',
-    'rtmark.net','mdstats.info','lastingillipe','fjhvwqjimr',
-    'jnbhi.com','dcbogyqtfxolp','creative-sb1','show-creative1'];
+                    'googlesyndication','adsco.re','xadsmart','facebook.net',
+                    'adexchangeclear','inadsexchange','protrafficinspector',
+                    'dogcollarfavourbluff','preferencenail','realizationnewest',
+                    'inklinkor','weirdopt','displayvertising','oyo4d.com',
+                    'rtmark.net','mdstats.info','lastingillipe','fjhvwqjimr',
+                    'jnbhi.com','dcbogyqtfxolp','creative-sb1','show-creative1'];
 
 function looksLikeVideo(url) {
     const u = url.toLowerCase();
@@ -57,27 +63,16 @@ function looksLikeVideo(url) {
 async function launchBrowser() {
     return puppeteer.launch({
         args: [...chromium.args,
-            '--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage',
-            '--disable-gpu','--no-first-run','--no-zygote','--single-process',
-            '--mute-audio','--disable-blink-features=AutomationControlled',
-            '--disable-web-security','--allow-running-insecure-content'],
+               '--no-sandbox', '--disable-setuid-sandbox',
+               '--disable-dev-shm-usage', '--disable-gpu',
+               '--no-first-run', '--no-zygote', '--single-process',
+               '--mute-audio', '--disable-blink-features=AutomationControlled',
+               '--disable-web-security', '--allow-running-insecure-content'],
         defaultViewport: { width: 1280, height: 720 },
         executablePath: await chromium.executablePath(),
         headless: chromium.headless,
         ignoreHTTPSErrors: true,
     });
-}
-
-async function setupCDP(page) {
-    const cdp = await page.target().createCDPSession();
-    // GC heap dopo about:blank — NON usare Network.* (rompe Fetch interceptor)
-    await cdp.send('HeapProfiler.enable').catch(() => {});
-    await cdp.send('HeapProfiler.collectGarbage').catch(() => {});
-    await cdp.send('HeapProfiler.disable').catch(() => {});
-    await cdp.send('Fetch.enable', {
-        patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }]
-    });
-    return cdp;
 }
 
 app.post('/extract', async (req, res) => {
@@ -86,35 +81,23 @@ app.post('/extract', async (req, res) => {
 
     if (session && session.embedUrl === url) {
         session.ts = Date.now();
-        console.log('[v67] Cache hit:', session.videoUrl.substring(0, 60));
+        console.log('[v68] Cache hit:', session.videoUrl.substring(0, 60));
         return res.json({ success: true, video_url: session.videoUrl });
     }
 
     closeSession();
-    console.log('[v67] ESTRAZIONE:', url);
+    console.log('[v68] ESTRAZIONE:', url);
     let browser = null, page = null, resolved = false;
 
     const globalTimeout = setTimeout(() => {
-        if (!resolved) { resolved = true; if (browser) browser.close().catch(()=>{}); res.json({ success: false, message: 'Timeout' }); }
-        console.log('[v67] TIMEOUT');
-    }, 120000);
-
-    const onFound = async (u) => {
-        if (resolved) return;
-        resolved = true; clearTimeout(globalTimeout);
-        console.log('[v67] Video:', u.substring(0, 80));
-        try {
-            await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
-            const cdp = await setupCDP(page);
-            console.log('[v67] ✅ CDP pronto');
-            session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now() };
-            res.json({ success: true, video_url: u });
-        } catch(e) {
-            console.error('[v67] CDP err:', e.message);
+        console.log('[v68] TIMEOUT');
+        if (!resolved) {
+            resolved = true;
+            if (page) page.close().catch(() => {});
             if (browser) browser.close().catch(() => {});
-            res.json({ success: false, message: 'CDP err' });
+            res.json({ success: false, message: 'Timeout' });
         }
-    };
+    }, 120000);
 
     try {
         browser = await launchBrowser();
@@ -131,9 +114,43 @@ app.post('/extract', async (req, res) => {
             const u = request.url();
             if (BLOCK_URLS.some(b => u.includes(b))) { try { request.abort(); } catch(e) {} return; }
             if (looksLikeVideo(u)) {
+                console.log('[v68] Video:', u.substring(0, 80));
                 interceptorDone = true;
                 try { request.abort(); } catch(e) {}
-                onFound(u);
+                if (!resolved) {
+                    resolved = true; clearTimeout(globalTimeout);
+                    page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 })
+                        .then(async () => {
+                            try {
+                                const cdp = await page.target().createCDPSession();
+                                await cdp.send('Fetch.enable', {
+                                    patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }]
+                                });
+                                console.log('[v68] ✅ CDP pronto');
+                                session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now() };
+                                res.json({ success: true, video_url: u });
+                            } catch(e) {
+                                console.error('[v68] CDP err:', e.message);
+                                if (browser) browser.close().catch(() => {});
+                                res.json({ success: false, message: 'CDP err' });
+                            }
+                        })
+                        .catch(() => {
+                            setTimeout(async () => {
+                                try {
+                                    const cdp = await page.target().createCDPSession();
+                                    await cdp.send('Fetch.enable', {
+                                        patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }]
+                                    });
+                                    session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now() };
+                                    res.json({ success: true, video_url: u });
+                                } catch(e) {
+                                    if (browser) browser.close().catch(() => {});
+                                    res.json({ success: false, message: 'CDP err fallback' });
+                                }
+                            }, 1000);
+                        });
+                }
                 return;
             }
             try { request.continue(); } catch(e) {}
@@ -141,39 +158,75 @@ app.post('/extract', async (req, res) => {
 
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'it-IT,it;q=0.9' });
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(e => console.log('[v67] goto:', e.message.substring(0,60)));
+        // goto timeout 15s (fail fast) — v51b
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 })
+            .catch(e => console.log('[v68] goto:', e.message.substring(0, 60)));
 
+        // poll 10x500ms = 5s — v51b
         for (let w = 0; w < 10 && !resolved; w++) {
             await sleep(500);
             const q = await page.evaluate(() => {
-                try { if (window.MDCore?.wurl) { const u = window.MDCore.wurl; return u.startsWith('//') ? 'https:'+u : u; } } catch(e) {}
+                try { if (window.MDCore?.wurl) { const u = window.MDCore.wurl; return u.startsWith('//') ? 'https:' + u : u; } } catch(e) {}
                 const m = document.documentElement.innerHTML.match(/"(https?:\/\/[^"]{15,}\.(?:mp4|m3u8)[^"]{0,100})"/);
                 return m?.[1] || null;
             }).catch(() => null);
-            if (q) { await onFound(q); return; }
+            if (q && !resolved) {
+                resolved = true; clearTimeout(globalTimeout);
+                try {
+                    await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
+                    const cdp = await page.target().createCDPSession();
+                    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }] });
+                    session = { embedUrl: url, videoUrl: q, browser, page, cdp, ts: Date.now() };
+                    res.json({ success: true, video_url: q });
+                } catch(e) {
+                    if (browser) browser.close().catch(() => {});
+                    res.json({ success: false, message: 'CDP err: ' + e.message });
+                }
+                return;
+            }
         }
         if (resolved) return;
 
+        // click loop 25x800ms — v51b
         for (let i = 0; i < 25 && !resolved; i++) {
             await page.mouse.click(640+(Math.random()*40-20), 360+(Math.random()*40-20)).catch(() => {});
             await sleep(800);
             if ((i+1) % 3 === 0) {
                 const v = await page.evaluate(() => {
-                    try { if (window.MDCore?.wurl) { const u = window.MDCore.wurl; return u.startsWith('//') ? 'https:'+u : u; } } catch(e) {}
+                    try { if (window.MDCore?.wurl) { const u = window.MDCore.wurl; return u.startsWith('//') ? 'https:' + u : u; } } catch(e) {}
                     const m = document.documentElement.innerHTML.match(/"(https?:\/\/[^"]{15,}\.(?:mp4|m3u8)[^"]{0,100})"/);
                     return m?.[1] || null;
                 }).catch(() => null);
-                if (v) { await onFound(v); return; }
-                console.log(`[v67] Click ${i+1}: niente`);
+                if (v && !resolved) {
+                    resolved = true; clearTimeout(globalTimeout);
+                    try {
+                        await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
+                        const cdp = await page.target().createCDPSession();
+                        await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }] });
+                        session = { embedUrl: url, videoUrl: v, browser, page, cdp, ts: Date.now() };
+                        res.json({ success: true, video_url: v });
+                    } catch(e) {
+                        if (browser) browser.close().catch(() => {});
+                        res.json({ success: false, message: 'CDP err: ' + e.message });
+                    }
+                    return;
+                }
+                console.log(`[v68] Click ${i+1}: niente`);
             }
         }
     } catch(e) {
-        console.error('[v67] ERRORE:', e.message);
+        console.error('[v68] ERRORE:', e.message);
         clearTimeout(globalTimeout);
-        if (!resolved) { resolved = true; if (browser) browser.close().catch(()=>{}); res.json({ success: false, message: e.message }); }
+        if (page) page.close().catch(() => {});
+        if (!resolved) {
+            resolved = true;
+            if (browser) browser.close().catch(() => {});
+            res.json({ success: false, message: 'Errore: ' + e.message });
+        }
     }
 });
 
+// PROXY: identico a v51b — CDP IO.read, fire-and-forget fetch, CDP ricreato dopo timeout
 app.get('/proxy', async (req, res) => {
     const { url: videoUrl, src: embedSrc } = req.query;
     if (!videoUrl) return res.status(400).send('URL mancante');
@@ -195,15 +248,19 @@ app.get('/proxy', async (req, res) => {
         await withProxyLock(async () => {
             if (!session?.cdp) throw new Error('Sessione persa');
             console.log(`[proxy] CDP fetch: ${rangeStr}`);
-            const { page } = session;
-            const cdp = session.cdp;
+            const { page, cdp } = session;
 
             const streamReady = new Promise((resolve, reject) => {
                 const timer = setTimeout(async () => {
                     cdp.removeListener('Fetch.requestPaused', handler);
+                    // Ricrea CDP dopo timeout per pulire listener zombie
                     try {
                         await cdp.detach().catch(() => {});
-                        session.cdp = await setupCDP(session.page);
+                        const newCdp = await session.page.target().createCDPSession();
+                        await newCdp.send('Fetch.enable', {
+                            patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }]
+                        });
+                        session.cdp = newCdp;
                         console.log('[proxy] CDP ricreato');
                     } catch(e) {}
                     reject(new Error('Timeout CDP 25s'));
@@ -232,16 +289,11 @@ app.get('/proxy', async (req, res) => {
                 cdp.on('Fetch.requestPaused', handler);
             });
 
-            // FIX OOM: cancella il response body nel renderer dopo che CDP l'ha preso
-            // Senza r.body.cancel(), il browser accumula i body non consumati → OOM
+            // Fire-and-forget identico a v51b
             page.evaluate(async (opts) => {
-                try {
-                    const r = await fetch(opts.url, {
-                        headers: { 'Range': opts.range, 'Accept': '*/*', 'Referer': opts.referer }
-                    });
-                    // Cancella subito il body — CDP lo ha già intercettato
-                    if (r.body) r.body.cancel();
-                } catch(e) {}
+                fetch(opts.url, {
+                    headers: { 'Range': opts.range, 'Accept': '*/*', 'Referer': opts.referer }
+                }).catch(() => {});
             }, { url: videoUrl, range: rangeStr, referer: embedSrc || 'https://mixdrop.vip/' }).catch(() => {});
 
             const { stream, status, ct, cr, cl } = await streamReady;
@@ -278,4 +330,4 @@ app.get('/proxy', async (req, res) => {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v67 porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v68 porta ${PORT}`));
