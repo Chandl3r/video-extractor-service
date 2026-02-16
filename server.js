@@ -16,16 +16,16 @@ app.use((req, res, next) => {
 
 // Solo questi due aggiunti rispetto a v51-diag
 try { execSync('pkill -f "chromium|chrome" 2>/dev/null || true', { timeout: 3000 }); } catch(e) {}
-process.on('unhandledRejection', (r) => console.error('[v79] unhandledRejection:', r?.message || r));
+process.on('unhandledRejection', (r) => console.error('[v80] unhandledRejection:', r?.message || r));
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v79' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v80' }));
 
 let session = null;
 let proxyChain = Promise.resolve();
 
 function closeSession() {
     if (session) {
-        console.log('[v79] Chiudo sessione');
+        console.log('[v80] Chiudo sessione');
         if (session.browser) session.browser.close().catch(() => {});
         session = null;
         proxyChain = Promise.resolve();
@@ -81,16 +81,16 @@ app.post('/extract', async (req, res) => {
 
     if (session && session.embedUrl === url) {
         session.ts = Date.now();
-        console.log('[v79] Cache hit:', session.videoUrl.substring(0, 60));
+        console.log('[v80] Cache hit:', session.videoUrl.substring(0, 60));
         return res.json({ success: true, video_url: session.videoUrl });
     }
 
     closeSession();
-    console.log('[v79] ESTRAZIONE:', url);
+    console.log('[v80] ESTRAZIONE:', url);
     let browser = null, page = null, resolved = false;
 
     const globalTimeout = setTimeout(() => {
-        console.log('[v79] TIMEOUT');
+        console.log('[v80] TIMEOUT');
         if (!resolved) {
             resolved = true;
             if (page) page.close().catch(() => {});
@@ -98,6 +98,32 @@ app.post('/extract', async (req, res) => {
             res.json({ success: false, message: 'Timeout' });
         }
     }, 120000);
+
+    // Helper: purge DOM in-place, crea CDPSession, risponde al client
+    // NON usa goto('about:blank'): preserva CDP context, evita interferenza con setRequestInterception
+    async function finalize(videoUrl) {
+        await page.setRequestInterception(false).catch(() => {});
+        await page.evaluate(() => {
+            try {
+                const maxId = setTimeout(() => {}, 0);
+                for (let i = 0; i <= maxId; i++) { clearTimeout(i); clearInterval(i); }
+                document.querySelectorAll('script,iframe,video,audio,img,link,style').forEach(el => el.remove());
+                document.body.innerHTML = '';
+                document.head.innerHTML = '';
+                // GC pressure: forza V8 major GC allocando e rilasciando blocchi grandi
+                const blocks = [];
+                for (let i = 0; i < 5; i++) blocks.push(new Array(1000000).fill(0));
+                blocks.length = 0;
+            } catch(e) {}
+        }).catch(() => {});
+        const cdp = await page.target().createCDPSession();
+        await cdp.send('Fetch.enable', {
+            patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }]
+        });
+        console.log('[v80] ✅ CDP pronto (DOM purged, no navigation)');
+        session = { embedUrl: url, videoUrl, browser, page, cdp, ts: Date.now() };
+        res.json({ success: true, video_url: videoUrl });
+    }
 
     try {
         browser = await launchBrowser();
@@ -114,50 +140,16 @@ app.post('/extract', async (req, res) => {
             const u = request.url();
             if (BLOCK_URLS.some(b => u.includes(b))) { try { request.abort(); } catch(e) {} return; }
             if (looksLikeVideo(u)) {
-                console.log('[v79] Video:', u.substring(0, 80));
+                console.log('[v80] Video:', u.substring(0, 80));
                 interceptorDone = true;
                 try { request.abort(); } catch(e) {}
                 if (!resolved) {
                     resolved = true; clearTimeout(globalTimeout);
-                    page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 })
-                        .then(async () => {
-                            try {
-                                // Forza GC: alloca e rilascia oggetti grandi per creare pressione V8
-                                await page.evaluate(() => {
-                                    try {
-                                        const a = new Array(2000000).fill(null);
-                                        const b = new Array(2000000).fill(null);
-                                        a.length = 0; b.length = 0;
-                                    } catch(e) {}
-                                }).catch(() => {});
-                                const cdp = await page.target().createCDPSession();
-                                await cdp.send('Fetch.enable', {
-                                    patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }]
-                                });
-                                console.log('[v79] ✅ CDP pronto');
-                                session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now() };
-                                res.json({ success: true, video_url: u });
-                            } catch(e) {
-                                console.error('[v79] CDP err:', e.message);
-                                if (browser) browser.close().catch(() => {});
-                                res.json({ success: false, message: 'CDP err' });
-                            }
-                        })
-                        .catch(() => {
-                            setTimeout(async () => {
-                                try {
-                                    const cdp = await page.target().createCDPSession();
-                                    await cdp.send('Fetch.enable', {
-                                        patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }]
-                                    });
-                                    session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now() };
-                                    res.json({ success: true, video_url: u });
-                                } catch(e) {
-                                    if (browser) browser.close().catch(() => {});
-                                    res.json({ success: false, message: 'CDP err fallback' });
-                                }
-                            }, 1000);
-                        });
+                    finalize(u).catch(e => {
+                        console.error('[v80] CDP err:', e.message);
+                        if (browser) browser.close().catch(() => {});
+                        res.json({ success: false, message: 'CDP err: ' + e.message });
+                    });
                 }
                 return;
             }
@@ -167,7 +159,7 @@ app.post('/extract', async (req, res) => {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'it-IT,it;q=0.9' });
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 })
-            .catch(e => console.log('[v79] goto:', e.message.substring(0, 60)));
+            .catch(e => console.log('[v80] goto:', e.message.substring(0, 60)));
 
         for (let w = 0; w < 10 && !resolved; w++) {
             await sleep(500);
@@ -178,17 +170,7 @@ app.post('/extract', async (req, res) => {
             }).catch(() => null);
             if (q && !resolved) {
                 resolved = true; clearTimeout(globalTimeout);
-                try {
-                    await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
-                    await page.evaluate(() => { try { const a = new Array(2000000).fill(null); a.length=0; } catch(e){} }).catch(() => {});
-                    const cdp = await page.target().createCDPSession();
-                    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }] });
-                    session = { embedUrl: url, videoUrl: q, browser, page, cdp, ts: Date.now() };
-                    res.json({ success: true, video_url: q });
-                } catch(e) {
-                    if (browser) browser.close().catch(() => {});
-                    res.json({ success: false, message: 'CDP err: ' + e.message });
-                }
+                await finalize(q).catch(e => { if (browser) browser.close().catch(() => {}); res.json({ success: false, message: 'CDP err: ' + e.message }); });
                 return;
             }
         }
@@ -205,24 +187,14 @@ app.post('/extract', async (req, res) => {
                 }).catch(() => null);
                 if (v && !resolved) {
                     resolved = true; clearTimeout(globalTimeout);
-                    try {
-                        await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
-                        await page.evaluate(() => { try { const a = new Array(2000000).fill(null); a.length=0; } catch(e){} }).catch(() => {});
-                        const cdp = await page.target().createCDPSession();
-                        await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }] });
-                        session = { embedUrl: url, videoUrl: v, browser, page, cdp, ts: Date.now() };
-                        res.json({ success: true, video_url: v });
-                    } catch(e) {
-                        if (browser) browser.close().catch(() => {});
-                        res.json({ success: false, message: 'CDP err: ' + e.message });
-                    }
+                    await finalize(v).catch(e => { if (browser) browser.close().catch(() => {}); res.json({ success: false, message: 'CDP err: ' + e.message }); });
                     return;
                 }
-                console.log(`[v79] Click ${i+1}: niente`);
+                console.log(`[v80] Click ${i+1}: niente`);
             }
         }
     } catch(e) {
-        console.error('[v79] ERRORE:', e.message);
+        console.error('[v80] ERRORE:', e.message);
         clearTimeout(globalTimeout);
         if (page) page.close().catch(() => {});
         if (!resolved) {
@@ -328,4 +300,4 @@ app.get('/proxy', async (req, res) => {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v79 porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v80 porta ${PORT}`));
