@@ -14,17 +14,26 @@ app.use((req, res, next) => {
     next();
 });
 
-try { execSync('pkill -f "chromium|chrome" 2>/dev/null || true', { timeout: 3000 }); } catch(e) {}
-process.on('unhandledRejection', (r) => console.error('[v116] unhandledRejection:', r?.message || r));
+try { 
+    // Kill aggressivo processi Chrome zombie - 3 tentativi
+    execSync('pkill -9 -f "chromium|chrome" 2>/dev/null || true', { timeout: 2000 }); 
+    execSync('sleep 0.5', { timeout: 1000 });
+    execSync('pkill -9 -f "chromium|chrome" 2>/dev/null || true', { timeout: 2000 }); 
+    execSync('sleep 0.5', { timeout: 1000 });
+    // Pulisci /tmp da file Chrome vecchi
+    execSync('rm -rf /tmp/.X* /tmp/.org.chromium.* /tmp/puppeteer* 2>/dev/null || true', { timeout: 3000 });
+    console.log('[v125] ✅ Cleanup completato');
+} catch(e) { console.log('[v125] Cleanup err:', e.message); }
+process.on('unhandledRejection', (r) => console.error('[v125] unhandledRejection:', r?.message || r));
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v116' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v125' }));
 
 let session = null;
 let proxyChain = Promise.resolve();
 
 function closeSession() {
     if (session) {
-        console.log('[v116] Chiudo sessione');
+        console.log('[v125] Chiudo sessione');
         if (session.browser) session.browser.close().catch(() => {});
         session = null;
         proxyChain = Promise.resolve();
@@ -57,18 +66,44 @@ function looksLikeVideo(url) {
 }
 
 async function launchBrowser() {
-    return puppeteer.launch({
+    console.log('[v125] Launching browser...');
+    const browser = await puppeteer.launch({
         args: [...chromium.args,
                '--no-sandbox', '--disable-setuid-sandbox',
                '--disable-dev-shm-usage', '--disable-gpu',
                '--no-first-run', '--no-zygote', '--single-process',
                '--mute-audio', '--disable-blink-features=AutomationControlled',
-               '--disable-web-security', '--allow-running-insecure-content'],
+               '--disable-web-security', '--allow-running-insecure-content',
+               '--disable-background-networking',
+               '--disable-background-timer-throttling',
+               '--disable-breakpad',
+               '--disable-client-side-phishing-detection',
+               '--disable-component-extensions-with-background-pages',
+               '--disable-default-apps',
+               '--disable-extensions',
+               '--disable-features=TranslateUI',
+               '--disable-hang-monitor',
+               '--disable-ipc-flooding-protection',
+               '--disable-popup-blocking',
+               '--disable-prompt-on-repost',
+               '--disable-renderer-backgrounding',
+               '--disable-sync',
+               '--force-color-profile=srgb',
+               '--metrics-recording-only',
+               '--no-default-browser-check',
+               '--enable-automation',
+               '--password-store=basic',
+               '--use-mock-keychain',
+               '--disable-features=site-per-process',
+               '--js-flags=--max-old-space-size=256'],
         defaultViewport: { width: 1280, height: 720 },
         executablePath: await chromium.executablePath(),
         headless: chromium.headless,
         ignoreHTTPSErrors: true,
+        timeout: 20000, // 20s invece di 30s
     });
+    console.log('[v125] ✅ Browser launched');
+    return browser;
 }
 
 app.post('/extract', async (req, res) => {
@@ -77,16 +112,16 @@ app.post('/extract', async (req, res) => {
 
     if (session && session.embedUrl === url) {
         session.ts = Date.now();
-        console.log('[v116] Cache hit:', session.videoUrl.substring(0, 60));
+        console.log('[v125] Cache hit:', session.videoUrl.substring(0, 60));
         return res.json({ success: true, video_url: session.videoUrl });
     }
 
     closeSession();
-    console.log('[v116] ESTRAZIONE:', url);
+    console.log('[v125] ESTRAZIONE:', url);
     let browser = null, page = null, resolved = false;
 
     const globalTimeout = setTimeout(() => {
-        console.log('[v116] TIMEOUT');
+        console.log('[v125] TIMEOUT');
         if (!resolved) {
             resolved = true;
             if (page) page.close().catch(() => {});
@@ -110,7 +145,7 @@ app.post('/extract', async (req, res) => {
             const u = request.url();
             if (BLOCK_URLS.some(b => u.includes(b))) { try { request.abort(); } catch(e) {} return; }
             if (looksLikeVideo(u)) {
-                console.log('[v116] Video:', u.substring(0, 80));
+                console.log('[v125] Video:', u.substring(0, 80));
                 interceptorDone = true;
                 try { request.abort(); } catch(e) {}
                 if (!resolved) {
@@ -120,12 +155,14 @@ app.post('/extract', async (req, res) => {
                             try {
                                 const cdp = await page.target().createCDPSession();
                                 await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }] });
-                                console.log('[v116] ✅ CDP pronto');
-                                session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now() };
+                                console.log('[v125] ✅ CDP pronto');
+                                session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now(), chunkCount: 0 };
+                                // Sleep 100ms: garantisce che session.cdp sia completamente stabile
+                                // prima che il client riceva video_url e faccia richiesta /proxy
                                 res.json({ success: true, video_url: u });
-                                console.log('[v116] → Risposta inviata, session salvata');
+                                console.log('[v125] → Risposta inviata, session salvata');
                             } catch(e) {
-                                console.error('[v116] CDP err:', e.message);
+                                console.error('[v125] CDP err:', e.message);
                                 if (browser) browser.close().catch(() => {});
                                 res.json({ success: false, message: 'CDP err' });
                             }
@@ -135,9 +172,9 @@ app.post('/extract', async (req, res) => {
                                 try {
                                     const cdp = await page.target().createCDPSession();
                                     await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }] });
-                                    session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now() };
+                                    session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now(), chunkCount: 0 };
                                     res.json({ success: true, video_url: u });
-                                    console.log('[v116] → Risposta inviata (fallback)');
+                                    console.log('[v125] → Risposta inviata (fallback)');
                                 } catch(e) {
                                     if (browser) browser.close().catch(() => {});
                                     res.json({ success: false, message: 'CDP err fallback' });
@@ -153,7 +190,7 @@ app.post('/extract', async (req, res) => {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'it-IT,it;q=0.9' });
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 })
-            .catch(e => console.log('[v116] goto:', e.message.substring(0, 60)));
+            .catch(e => console.log('[v125] goto:', e.message.substring(0, 60)));
 
         for (let w = 0; w < 10 && !resolved; w++) {
             await sleep(500);
@@ -168,9 +205,9 @@ app.post('/extract', async (req, res) => {
                     await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
                     const cdp = await page.target().createCDPSession();
                     await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }] });
-                    session = { embedUrl: url, videoUrl: q, browser, page, cdp, ts: Date.now() };
+                    session = { embedUrl: url, videoUrl: q, browser, page, cdp, ts: Date.now(), chunkCount: 0 };
                     res.json({ success: true, video_url: q });
-                    console.log('[v116] → Risposta inviata (poll loop)');
+                    console.log('[v125] → Risposta inviata (poll loop)');
                 } catch(e) {
                     if (browser) browser.close().catch(() => {});
                     res.json({ success: false, message: 'CDP err: ' + e.message });
@@ -195,20 +232,20 @@ app.post('/extract', async (req, res) => {
                         await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
                         const cdp = await page.target().createCDPSession();
                         await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }] });
-                        session = { embedUrl: url, videoUrl: v, browser, page, cdp, ts: Date.now() };
+                        session = { embedUrl: url, videoUrl: v, browser, page, cdp, ts: Date.now(), chunkCount: 0 };
                         res.json({ success: true, video_url: v });
-                        console.log('[v116] → Risposta inviata (click loop)');
+                        console.log('[v125] → Risposta inviata (click loop)');
                     } catch(e) {
                         if (browser) browser.close().catch(() => {});
                         res.json({ success: false, message: 'CDP err: ' + e.message });
                     }
                     return;
                 }
-                console.log(`[v116] Click ${i+1}: niente`);
+                console.log(`[v125] Click ${i+1}: niente`);
             }
         }
     } catch(e) {
-        console.error('[v116] ERRORE:', e.message);
+        console.error('[v125] ERRORE:', e.message);
         clearTimeout(globalTimeout);
         if (page) page.close().catch(() => {});
         if (!resolved) {
@@ -221,6 +258,13 @@ app.post('/extract', async (req, res) => {
 
 app.get('/proxy', async (req, res) => {
     const { url: videoUrl, src: embedSrc } = req.query;
+    console.log('[proxy] RICHIESTA RICEVUTA');
+    console.log('[proxy] URL:', videoUrl?.substring(0, 80));
+    console.log('[proxy] Referer:', req.headers.referer);
+    console.log('[proxy] User-Agent:', req.headers['user-agent']);
+    console.log('[proxy] Session exists:', !!session);
+    console.log('[proxy] Session.cdp exists:', !!session?.cdp);
+    
     if (!videoUrl) return res.status(400).send('URL mancante');
 
     const rangeHeader = req.headers['range'];
@@ -243,7 +287,6 @@ app.get('/proxy', async (req, res) => {
             const { page } = session;
             let { cdp } = session;
 
-            // Fetch domain veloce: intercetta risposta, legge via IO.read stream
             const streamReady = new Promise((resolve, reject) => {
                 const timer = setTimeout(() => {
                     cdp.removeListener('Fetch.requestPaused', handler);
@@ -308,17 +351,12 @@ app.get('/proxy', async (req, res) => {
                 session.ts = Date.now();
                 if (total > 100 * 1024) session.chunkCount = (session.chunkCount || 0) + 1;
 
-                // Ogni 8 chunk: goto('about:blank') + nuovo CDP
-                // goto() resetta V8 completamente → zero fetch pending → zero memory leak
-                // DIVERSO da v96-v99: allora il video player era nel renderer (goto rompeva tutto)
-                //                     ora il player è nel client iOS → goto è safe ✅
-                // CDP detach da solo (v115) non bastava: le fetch pending rimanevano in V8
-                if (session.chunkCount % 8 === 0 && session.chunkCount > 0) {
+                // Ogni 6 chunk: goto('about:blank') + nuovo CDP
+                // Reset più frequente (era 8) per mantenere V8 più pulito
+                if (session.chunkCount % 7 === 0 && session.chunkCount > 0) {
                     console.log(`[proxy] 🔄 Reset renderer (chunk ${session.chunkCount})`);
                     try {
-                        // 1. Naviga a pagina vuota: V8 resettato, zero fetch pending
                         await session.page.goto('about:blank', { waitUntil: 'commit', timeout: 3000 }).catch(() => {});
-                        // 2. Nuovo CDP sul renderer fresco
                         await session.cdp.detach().catch(() => {});
                         const newCdp = await session.page.target().createCDPSession();
                         await newCdp.send('Fetch.enable', {
@@ -340,4 +378,4 @@ app.get('/proxy', async (req, res) => {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v116 porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v125 porta ${PORT}`));
