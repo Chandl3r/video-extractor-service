@@ -17,14 +17,14 @@ app.use((req, res, next) => {
 try { execSync('pkill -f "chromium|chrome" 2>/dev/null || true', { timeout: 3000 }); } catch(e) {}
 process.on('unhandledRejection', (r) => console.error('[v135] unhandledRejection:', r?.message || r));
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v135' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v135b' }));
 
 let session = null;
 let proxyChain = Promise.resolve();
 
 function closeSession() {
     if (session) {
-        console.log('[v135] ⚠️ CHIUDO SESSIONE - Called from:');
+        console.log('[v135b] ⚠️ CHIUDO SESSIONE - Called from:');
         console.log(new Error().stack);
         console.log('[v135] Session aveva:', { embedUrl: session.embedUrl, videoUrl: session.videoUrl?.substring(0, 60), chunkCount: session.chunkCount });
         if (session.browser) session.browser.close().catch(() => {});
@@ -38,15 +38,15 @@ setInterval(() => {
     const now = Date.now();
     if (session) {
         const age = Math.floor((now - session.ts) / 1000);
-        console.log(`[v135] 💓 Alive | Session:YES | Age:${age}s | Chunks:${session.chunkCount || 0} | CDP:${!!session.cdp}`);
+        console.log(`[v135b] 💓 Alive | Session:YES | Age:${age}s | Chunks:${session.chunkCount || 0} | CDP:${!!session.cdp}`);
     } else {
-        console.log('[v135] 💓 Alive | Session:NO - waiting for extraction');
+        console.log('[v135b] 💓 Alive | Session:NO - waiting for extraction');
     }
 }, 3000);
 
 setInterval(() => {
     if (session && Date.now() - session.ts > 15 * 60 * 1000) {
-        console.log('[v135] ⏰ Session timeout (15 min) - closing');
+        console.log('[v135b] ⏰ Session timeout (15 min) - closing');
         closeSession();
     }
 }, 60000);
@@ -93,29 +93,29 @@ app.post('/extract', async (req, res) => {
 
     if (session && session.embedUrl === url) {
         session.ts = Date.now();
-        console.log('[v135] Cache hit:', session.videoUrl.substring(0, 60));
+        console.log('[v135b] Cache hit:', session.videoUrl.substring(0, 60));
         return res.json({ success: true, video_url: session.videoUrl });
     }
 
     // Se session esiste E streaming in corso, NON chiuderla
     if (session) {
         if (session.proxyInProgress) {
-            console.log('[v135] ⚠️ STREAMING IN CORSO - blocco nuova estrazione');
+            console.log('[v135b] ⚠️ STREAMING IN CORSO - blocco nuova estrazione');
             return res.status(409).json({ success: false, message: 'Streaming in corso, attendi' });
         }
         // Se session recente (< 5 min) e stesso URL, ritorna cached
         if (Date.now() - session.ts < 300000 && session.embedUrl === url) {
-            console.log('[v135] Cache hit - stesso URL');
+            console.log('[v135b] Cache hit - stesso URL');
             return res.json({ success: true, video_url: session.videoUrl });
         }
     }
 
     closeSession();
-    console.log('[v135] ESTRAZIONE:', url);
+    console.log('[v135b] ESTRAZIONE:', url);
     let browser = null, page = null, resolved = false;
 
     const globalTimeout = setTimeout(() => {
-        console.log('[v135] TIMEOUT');
+        console.log('[v135b] TIMEOUT');
         if (!resolved) {
             resolved = true;
             if (page) page.close().catch(() => {});
@@ -148,15 +148,15 @@ app.post('/extract', async (req, res) => {
                         try {
                             const cdp = await page.target().createCDPSession();
                             await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }] });
-                            console.log('[v135] ✅ CDP pronto');
+                            console.log('[v135b] ✅ CDP pronto');
                             session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now(), chunkCount: 0 };
                             res.json({ success: true, video_url: u });
-                            console.log('[v135] ✅ Response sent to client - video_url:', u.substring(0, 80));
+                            console.log('[v135b] ✅ Response sent to client - video_url:', u.substring(0, 80));
                             // Attesa per vedere se il server sopravvive
                             await new Promise(r => setTimeout(r, 5000));
-                            console.log('[v135] 💚 Still alive 5s after response - waiting for /proxy request...');
+                            console.log('[v135b] 💚 Still alive 5s after response - waiting for /proxy request...');
                         } catch(e) {
-                            console.error('[v135] CDP err:', e.message);
+                            console.error('[v135b] CDP err:', e.message);
                             if (browser) browser.close().catch(() => {});
                             res.json({ success: false, message: 'CDP err' });
                         }
@@ -221,11 +221,11 @@ app.post('/extract', async (req, res) => {
                     }
                     return;
                 }
-                console.log(`[v135] Click ${i+1}: niente`);
+                console.log(`[v135b] Click ${i+1}: niente`);
             }
         }
     } catch(e) {
-        console.error('[v135] ERRORE:', e.message);
+        console.error('[v135b] ERRORE:', e.message);
         clearTimeout(globalTimeout);
         if (page) page.close().catch(() => {});
         if (!resolved) {
@@ -238,9 +238,9 @@ app.post('/extract', async (req, res) => {
 
 app.get('/proxy', async (req, res) => {
     const { url: videoUrl, src: embedSrc } = req.query;
-    console.log('[v135] 📥 PROXY REQUEST RECEIVED');
-    console.log('[v135] URL:', videoUrl?.substring(0, 80));
-    console.log('[v135] Session exists:', !!session, 'CDP exists:', !!session?.cdp);
+    console.log('[v135b] 📥 PROXY REQUEST RECEIVED');
+    console.log('[v135b] URL:', videoUrl?.substring(0, 80));
+    console.log('[v135b] Session exists:', !!session, 'CDP exists:', !!session?.cdp);
     
     if (!videoUrl) return res.status(400).send('URL mancante');
 
@@ -364,14 +364,18 @@ app.get('/proxy', async (req, res) => {
             // Clear flag - streaming completato
             if (session) session.proxyInProgress = false;
         });
-    } catch(e) {
-        // Clear flag anche in caso di errore
-        if (session) session.proxyInProgress = false;
-        console.error('[proxy] ERRORE:', e.message);
-        if (!res.headersSent) res.status(500).send('Errore: ' + e.message);
+} catch(e) {
+    // Clear flag anche in caso di errore  
+    if (session) session.proxyInProgress = false;
+    console.error('[proxy] ❌ ERRORE CRITICO:', e.message);
+    console.error('[proxy] Stack completo:', e.stack);
+    console.error('[proxy] Session:', { exists: !!session, cdp: !!session?.cdp });
+    if (!res.headersSent) {
+        res.status(500).json({ error: e.message, stack: e.stack });
     }
+}
 });
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v135 porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v135b porta ${PORT}`));
