@@ -15,16 +15,16 @@ app.use((req, res, next) => {
 });
 
 try { execSync('pkill -f "chromium|chrome" 2>/dev/null || true', { timeout: 3000 }); } catch(e) {}
-process.on('unhandledRejection', (r) => console.error('[v120] unhandledRejection:', r?.message || r));
+process.on('unhandledRejection', (r) => console.error('[v121] unhandledRejection:', r?.message || r));
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v120' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v121' }));
 
 let session = null;
 let proxyChain = Promise.resolve();
 
 function closeSession() {
     if (session) {
-        console.log('[v120] Chiudo sessione');
+        console.log('[v121] Chiudo sessione');
         if (session.browser) session.browser.close().catch(() => {});
         session = null;
         proxyChain = Promise.resolve();
@@ -77,16 +77,16 @@ app.post('/extract', async (req, res) => {
 
     if (session && session.embedUrl === url) {
         session.ts = Date.now();
-        console.log('[v120] Cache hit:', session.videoUrl.substring(0, 60));
+        console.log('[v121] Cache hit:', session.videoUrl.substring(0, 60));
         return res.json({ success: true, video_url: session.videoUrl });
     }
 
     closeSession();
-    console.log('[v120] ESTRAZIONE:', url);
+    console.log('[v121] ESTRAZIONE:', url);
     let browser = null, page = null, resolved = false;
 
     const globalTimeout = setTimeout(() => {
-        console.log('[v120] TIMEOUT');
+        console.log('[v121] TIMEOUT');
         if (!resolved) {
             resolved = true;
             if (page) page.close().catch(() => {});
@@ -110,29 +110,34 @@ app.post('/extract', async (req, res) => {
             const u = request.url();
             if (BLOCK_URLS.some(b => u.includes(b))) { try { request.abort(); } catch(e) {} return; }
             if (looksLikeVideo(u)) {
-                console.log('[v120] Video:', u.substring(0, 80));
+                console.log('[v121] Video:', u.substring(0, 80));
                 interceptorDone = true;
                 try { request.abort(); } catch(e) {}
                 if (!resolved) {
                     resolved = true; clearTimeout(globalTimeout);
-                    // NO goto - CDP setup diretto (goto causa timeout con mixdrop)
-                    (async () => {
+                    // Crea NUOVA page pulita (cookies browser condivisi!)
+                    browser.newPage().then(async (cleanPage) => {
                         try {
-                            const cdp = await page.target().createCDPSession();
+                            // Vai su mixdrop blank per avere stesso origin (cookies passati)
+                            await cleanPage.goto(url.replace(/\/[^\/]*$/, '/'), { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
+                            const cdp = await cleanPage.target().createCDPSession();
                             await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }] });
-                            console.log('[v120] ✅ CDP pronto');
-                            session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now(), chunkCount: 0 };
+                            console.log('[v121] ✅ CDP pronto (nuova page)');
+                            session = { embedUrl: url, videoUrl: u, browser, page: cleanPage, cdp, ts: Date.now(), chunkCount: 0 };
                             res.json({ success: true, video_url: u });
-                            console.log('[v120] → Risposta inviata, session salvata');
-                            // Wait to confirm server doesn't crash
-                            await new Promise(r => setTimeout(r, 2000));
-                            console.log('[v120] ✅ Still alive 2s after response');
+                            console.log('[v121] → Risposta inviata, session salvata');
+                            // Chiudi vecchia page sporca
+                            page.close().catch(() => {});
                         } catch(e) {
-                            console.error('[v120] CDP err:', e.message);
+                            console.error('[v121] CDP err:', e.message);
                             if (browser) browser.close().catch(() => {});
                             res.json({ success: false, message: 'CDP err' });
                         }
-                    })();
+                    }).catch((e) => {
+                        console.error('[v121] newPage err:', e.message);
+                        if (browser) browser.close().catch(() => {});
+                        res.json({ success: false, message: 'newPage err' });
+                    });
                 }
                 return;
             }
@@ -142,7 +147,7 @@ app.post('/extract', async (req, res) => {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'it-IT,it;q=0.9' });
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 })
-            .catch(e => console.log('[v120] goto:', e.message.substring(0, 60)));
+            .catch(e => console.log('[v121] goto:', e.message.substring(0, 60)));
 
         for (let w = 0; w < 10 && !resolved; w++) {
             await sleep(500);
@@ -154,12 +159,11 @@ app.post('/extract', async (req, res) => {
             if (q && !resolved) {
                 resolved = true; clearTimeout(globalTimeout);
                 try {
-                    // NO goto - CDP diretto
                     const cdp = await page.target().createCDPSession();
                     await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }] });
                     session = { embedUrl: url, videoUrl: q, browser, page, cdp, ts: Date.now(), chunkCount: 0 };
                     res.json({ success: true, video_url: q });
-                    console.log('[v120] → Risposta inviata (poll loop)');
+                    console.log('[v121] → Risposta inviata (poll loop)');
                 } catch(e) {
                     if (browser) browser.close().catch(() => {});
                     res.json({ success: false, message: 'CDP err: ' + e.message });
@@ -181,23 +185,22 @@ app.post('/extract', async (req, res) => {
                 if (v && !resolved) {
                     resolved = true; clearTimeout(globalTimeout);
                     try {
-                        // NO goto - CDP diretto
                         const cdp = await page.target().createCDPSession();
                         await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*mxcontent.net*', requestStage: 'Response' }] });
                         session = { embedUrl: url, videoUrl: v, browser, page, cdp, ts: Date.now(), chunkCount: 0 };
                         res.json({ success: true, video_url: v });
-                        console.log('[v120] → Risposta inviata (click loop)');
+                        console.log('[v121] → Risposta inviata (click loop)');
                     } catch(e) {
                         if (browser) browser.close().catch(() => {});
                         res.json({ success: false, message: 'CDP err: ' + e.message });
                     }
-                    return;
+                    break;  // ← STOP LOOP!
                 }
-                console.log(`[v120] Click ${i+1}: niente`);
+                console.log(`[v121] Click ${i+1}: niente`);
             }
         }
     } catch(e) {
-        console.error('[v120] ERRORE:', e.message);
+        console.error('[v121] ERRORE:', e.message);
         clearTimeout(globalTimeout);
         if (page) page.close().catch(() => {});
         if (!resolved) {
@@ -339,4 +342,4 @@ app.get('/proxy', async (req, res) => {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v120 porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v121 porta ${PORT}`));
