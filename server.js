@@ -15,16 +15,16 @@ app.use((req, res, next) => {
 });
 
 try { execSync('pkill -f "chromium|chrome" 2>/dev/null || true', { timeout: 3000 }); } catch(e) {}
-process.on('unhandledRejection', (r) => console.error('[v127] unhandledRejection:', r?.message || r));
+process.on('unhandledRejection', (r) => console.error('[v128] unhandledRejection:', r?.message || r));
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v127' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Video Extractor v128' }));
 
 let session = null;
 let proxyChain = Promise.resolve();
 
 function closeSession() {
     if (session) {
-        console.log('[v127] Chiudo sessione');
+        console.log('[v128] Chiudo sessione');
         if (session.browser) session.browser.close().catch(() => {});
         session = null;
         proxyChain = Promise.resolve();
@@ -77,7 +77,7 @@ app.post('/extract', async (req, res) => {
 
     if (session && session.embedUrl === url) {
         session.ts = Date.now();
-        console.log('[v127] Cache hit:', session.videoUrl.substring(0, 60));
+        console.log('[v128] Cache hit:', session.videoUrl.substring(0, 60));
         return res.json({ success: true, video_url: session.videoUrl });
     }
 
@@ -93,12 +93,12 @@ app.post('/extract', async (req, res) => {
     else if (url.includes('streamhg')) platform = 'streamhg';
     else if (url.includes('youtube') || url.includes('youtu.be')) platform = 'youtube';
     
-    console.log('[v127] ESTRAZIONE:', url);
-    console.log('[v127] Platform:', platform);
+    console.log('[v128] ESTRAZIONE:', url);
+    console.log('[v128] Platform:', platform);
     let browser = null, page = null, resolved = false;
 
     const globalTimeout = setTimeout(() => {
-        console.log('[v127] TIMEOUT');
+        console.log('[v128] TIMEOUT');
         if (!resolved) {
             resolved = true;
             if (page) page.close().catch(() => {});
@@ -124,8 +124,8 @@ app.post('/extract', async (req, res) => {
             if (BLOCK_URLS.some(b => u.includes(b))) { try { request.abort(); } catch(e) {} return; }
             // Debug: log TUTTE le richieste che sembrano video
             if (looksLikeVideo(u)) {
-                console.log('[v127] 🎬 Video detected:', u.substring(0, 100));
-                console.log('[v127] Video:', u.substring(0, 80));
+                console.log('[v128] 🎬 Video detected:', u.substring(0, 100));
+                console.log('[v128] Video:', u.substring(0, 80));
                 interceptorDone = true;
                 try { request.abort(); } catch(e) {}
                 if (!resolved) {
@@ -143,14 +143,14 @@ app.post('/extract', async (req, res) => {
                                         { urlPattern: '*.ts*', requestStage: 'Response' }
                                     ] 
                                 });
-                                console.log('[v127] ✅ CDP pronto');
+                                console.log('[v128] ✅ CDP pronto');
                                 // Ferma request interception (risparmio CPU durante streaming)
                                 await page.setRequestInterception(false).catch(() => {});
                                 session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now() };
                                 res.json({ success: true, video_url: u });
-                                console.log('[v127] → Risposta inviata, session salvata');
+                                console.log('[v128] → Risposta inviata, session salvata');
                             } catch(e) {
-                                console.error('[v127] CDP err:', e.message);
+                                console.error('[v128] CDP err:', e.message);
                                 if (browser) browser.close().catch(() => {});
                                 res.json({ success: false, message: 'CDP err' });
                             }
@@ -169,7 +169,7 @@ app.post('/extract', async (req, res) => {
                                     await page.setRequestInterception(false).catch(() => {});
                                     session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now() };
                                     res.json({ success: true, video_url: u });
-                                    console.log('[v127] → Risposta inviata (fallback)');
+                                    console.log('[v128] → Risposta inviata (fallback)');
                                 } catch(e) {
                                     if (browser) browser.close().catch(() => {});
                                     res.json({ success: false, message: 'CDP err fallback' });
@@ -186,18 +186,57 @@ app.post('/extract', async (req, res) => {
         await page.setRequestInterception(true);
         page.on('request', requestHandler);
         
-        // Intercetta IFRAME (MaxStream e altri caricano video in iframe!)
+        // Intercetta IFRAME con CDP Network (più robusto di request interception!)
         browser.on('targetcreated', async (target) => {
             if (target.type() === 'page' || target.type() === 'iframe') {
                 try {
                     const iframePage = await target.page();
-                    if (iframePage) {
+                    if (iframePage && !resolved) {
+                        // Request interception per bloccare ads
                         await iframePage.setRequestInterception(true);
                         iframePage.on('request', requestHandler);
-                        console.log('[v127] 🖼️ Iframe detected, interception enabled');
+                        
+                        // CDP Network per catturare TUTTE le richieste (anche già completate)
+                        const client = await iframePage.target().createCDPSession();
+                        await client.send('Network.enable');
+                        
+                        client.on('Network.requestWillBeSent', (params) => {
+                            if (!resolved && looksLikeVideo(params.request.url)) {
+                                const u = params.request.url;
+                                console.log('[v128] 🎬 Video in iframe:', u.substring(0, 100));
+                                if (!resolved) {
+                                    resolved = true;
+                                    clearTimeout(globalTimeout);
+                                    // Usa questo URL per streaming
+                                    (async () => {
+                                        try {
+                                            await page.goto('about:blank', { timeout: 3000 }).catch(() => {});
+                                            const cdp = await page.target().createCDPSession();
+                                            await cdp.send('Fetch.enable', { 
+                                                patterns: [
+                                                    { urlPattern: '*.mp4*', requestStage: 'Response' },
+                                                    { urlPattern: '*.m3u8*', requestStage: 'Response' },
+                                                    { urlPattern: '*.ts*', requestStage: 'Response' }
+                                                ] 
+                                            });
+                                            await page.setRequestInterception(false).catch(() => {});
+                                            session = { embedUrl: url, videoUrl: u, browser, page, cdp, ts: Date.now() };
+                                            res.json({ success: true, video_url: u });
+                                            console.log('[v128] → Risposta inviata (iframe)');
+                                        } catch(e) {
+                                            console.error('[v128] CDP err:', e.message);
+                                            if (browser) browser.close().catch(() => {});
+                                            res.json({ success: false, message: 'CDP err iframe' });
+                                        }
+                                    })();
+                                }
+                            }
+                        });
+                        
+                        console.log('[v128] 🖼️ Iframe detected, CDP Network enabled');
                     }
                 } catch(e) {
-                    // Iframe già chiuso o non accessibile
+                    console.log('[v128] Iframe err:', e.message.substring(0, 60));
                 }
             }
         });
@@ -205,7 +244,7 @@ app.post('/extract', async (req, res) => {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'it-IT,it;q=0.9' });
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 })
-            .catch(e => console.log('[v127] goto:', e.message.substring(0, 60)));
+            .catch(e => console.log('[v128] goto:', e.message.substring(0, 60)));
 
         for (let w = 0; w < 10 && !resolved; w++) {
             await sleep(500);
@@ -228,7 +267,7 @@ app.post('/extract', async (req, res) => {
                     });
                     session = { embedUrl: url, videoUrl: q, browser, page, cdp, ts: Date.now() };
                     res.json({ success: true, video_url: q });
-                    console.log('[v127] → Risposta inviata (poll loop)');
+                    console.log('[v128] → Risposta inviata (poll loop)');
                 } catch(e) {
                     if (browser) browser.close().catch(() => {});
                     res.json({ success: false, message: 'CDP err: ' + e.message });
@@ -261,18 +300,18 @@ app.post('/extract', async (req, res) => {
                         });
                         session = { embedUrl: url, videoUrl: v, browser, page, cdp, ts: Date.now() };
                         res.json({ success: true, video_url: v });
-                        console.log('[v127] → Risposta inviata (click loop)');
+                        console.log('[v128] → Risposta inviata (click loop)');
                     } catch(e) {
                         if (browser) browser.close().catch(() => {});
                         res.json({ success: false, message: 'CDP err: ' + e.message });
                     }
                     return;
                 }
-                console.log(`[v127] Click ${i+1}: niente`);
+                console.log(`[v128] Click ${i+1}: niente`);
             }
         }
     } catch(e) {
-        console.error('[v127] ERRORE:', e.message);
+        console.error('[v128] ERRORE:', e.message);
         clearTimeout(globalTimeout);
         if (page) page.close().catch(() => {});
         if (!resolved) {
@@ -408,4 +447,4 @@ app.get('/proxy', async (req, res) => {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Video Extractor v127 porta ${PORT}`));
+app.listen(PORT, () => console.log(`Video Extractor v128 porta ${PORT}`));
